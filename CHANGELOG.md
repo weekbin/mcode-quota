@@ -60,18 +60,19 @@
 
 每个版本做的验证：
 
-| 验证项 | v1.0 | v1.1 | v1.2 | v1.3 |
-|---|---|---|---|---|
-| `bash -n` patcher 语法 | ✅ | ✅ | ✅ | ✅ |
-| `bash -n` wrapper 语法 | ✅ | ✅ | ✅ | ✅ |
-| `bash -n` doctor 语法 | ✅ | ✅ | ✅ | ✅ |
-| `node --check` launcher | n/a | ✅ | ✅ | ✅ |
-| `node --check` sidecar | ✅ | ✅ | ✅ | ✅ |
-| doctor 10/10 | ✅ | ✅ | ✅ | ✅ |
-| sidecar 单独运行（输出格式） | ✅ | ✅ | ✅ | ✅ |
-| mcode TUI `script -qfc` 渲染（narrow 80 cols） | ✅ | ✅ | ✅ | ✅ |
-| mcode TUI 渲染（wide 120 cols） | n/a | n/a | ✅ | n/a |
-| mcode TUI 渲染（wide 160 cols） | n/a | n/a | n/a | ✅ |
+| 验证项 | v1.0 | v1.1 | v1.2 | v1.3 | v1.4 | v1.5 |
+|---|---|---|---|---|---|---|
+| `bash -n` patcher 语法 | ✅ | ✅ | ✅ | ✅ | n/a | n/a |
+| `node --check` patcher | n/a | n/a | n/a | n/a | ✅ | ✅ |
+| `node --check` launcher | n/a | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `node --check` sidecar | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| doctor 10/10 | ✅ | ✅ | ✅ | ✅ | n/a | n/a |
+| sidecar 单独运行（输出格式） | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| mcode TUI 渲染（narrow 80 cols） | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| mcode TUI 渲染（wide 120 cols） | n/a | n/a | ✅ | n/a | n/a | n/a |
+| mcode TUI 渲染（wide 160 cols） | n/a | n/a | n/a | ✅ | ✅ | ✅ |
+| bridge layer（globalThis.__mcodeRuntime） | n/a | n/a | n/a | n/a | n/a | ✅ |
+| 第三行 session tokens 渲染 | n/a | n/a | n/a | n/a | n/a | ✅（mock 验证） |
 
 ---
 
@@ -81,8 +82,10 @@
 /home/weekbin/orca/projects/mcode/mcode-quota/
 ├── README.md                  # 用户文档
 ├── MAINTENANCE.md             # 维护指南（升级 / 失败 / 还原 / 自定义）
+├── ARCHITECTURE.md            # 原理说明（patch 机制 / bridge 机制）
 ├── CHANGELOG.md               # 本文件
-├── mcode-patch-quota.sh       # 升级后重跑
+├── mcode-find-anchors.mjs     # AST 锚点查找（v1.4+）
+├── mcode-patch-quota.mjs      # 升级后重跑（Node 版，v1.4+）
 ├── mcode-with-quota           # 一键启动 wrapper
 └── mcode-quota-doctor         # 自检
 
@@ -95,12 +98,14 @@
 
 ## 未来可能的工作
 
-- [ ] 把 `mcode-quota/` 纳入 git 版本管理
+- [ ] 把 `mcode-quota/` 纳入 git 版本管理（**已完成** — 4 个 commit，0.3.10 / v1.4 / v1.5）
+- [x] 把锚点查找自动化（v1.4 AST 通用匹配）
+- [x] 第三行 session tokens 累计显示（v1.5）
 - [ ] patcher 加 `--revert` 一键还原选项
 - [ ] sidecar 支持 multiple model（同时显示 video / general / 其他）
 - [ ] 添加图标（用 nerd font 或 emoji 装饰标签 / 进度条）
-- [ ] 把锚点查找自动化（脚本能自动定位 `Xc.render` + `jf.constructor` 而不依赖固定字符串匹配）
 - [ ] 多个 TUI 实例同时跑时 sidecar 共享（目前每个 mcode 进程独立 fork mmx）
+- [ ] session 切换时立即刷新（现在依赖 10s 轮询）
 
 ### v1.4 — Universal AST-based patcher (no hardcoded short names)
 
@@ -132,3 +137,74 @@
 **Patch payload sizes** (no longer depend on internal short names like `X6`, `J6`, `t3`, `xe`, `o3`):
 - PATCH_AFTER_CTOR = `static{;if(typeof globalThis.__mcodeQuotaStart==="function")globalThis.__mcodeQuotaStart(()=>{if(this.requestRender)setTimeout(()=>this.requestRender(),0)})}`  (152 chars)
 - PATCH_BEFORE_CLASS_END = `render(e){let r=super.render(e);if(Array.isArray(r)){let _qr=typeof globalThis.__mcodeQuotaRender==="function"?globalThis.__mcodeQuotaRender(e):[];if(Array.isArray(_qr)&&_qr.length>0)return[...r,..._qr]}return r}`  (213 chars)
+
+---
+
+## 2026-09-08 — v1.5 第三行：当前会话累计 token
+
+### 用户诉求
+> 能否显示当前会话累计使用的 token，负载在 Weekly usage 的后面，累计使用 token 的计算公式为 输入+输出+缓存命中
+
+### 数据源调研
+- mcode 内部已经有 `runtime.getSessionUsageSummary(sessionId)` API（chunk-CTHP2I62.js），返回 `{summary, rows}`
+- summary 字段：`inputTokens` (fresh, 非 cache)、`outputTokens`、`cacheReadTokens` (cache 命中)、`cacheWriteTokens`、`reasoningTokens`、`totalTokens`
+- 用户的"输入+输出+缓存命中" 在 mcode 字段语义下 = `inputTokens + outputTokens + cacheReadTokens` (fresh input + output + cache 命中 = 总消费 token)
+- 注意：mcode 自己的 `totalTokens = inputTokens + outputTokens + reasoningTokens`（用 fresh input，不含 cache）—— 和用户公式不一样，所以不能用 mcode 的 `totalTokens`
+
+### 实现方式
+**bridge: globalThis 共享**
+- patched `static { }` block 加 setState wrap：
+  ```js
+  static {
+    const _C = this;
+    if (_C.prototype.setState && !_C.prototype.__mcodeQ) {
+      _C.prototype.__mcodeQ = 1;
+      const _O = _C.prototype.setState;
+      _C.prototype.setState = function(t) {
+        if (this.runtime) globalThis.__mcodeRuntime = this.runtime;
+        const r = _O.call(this, t);
+        if (this.shellState) globalThis.__mcodeShellState = this.shellState;
+        return r;
+      };
+    }
+    if (typeof globalThis.__mcodeQuotaStart === "function") {
+      globalThis.__mcodeQuotaStart(() => {});
+    }
+  }
+  ```
+- 第一次 setState 调用时，runtime 被推到 globalThis；后续每次 setState 更新 shellState
+- shellState 的 `agentSessionId` 字段就是当前 mcode session id（来自 launcher chrome 的 setState 调用：见 880613 + 950688）
+
+**sidecar 新增**
+- `let session = { valid: false, total: 0, input: 0, output: 0, cache: 0, reasoning: 0, sessionId: null, fetchedAt: 0 }`
+- `fetchSessionOnce()` 每 10s 调 `runtime.getSessionUsageSummary(shellState.agentSessionId)`
+- `__mcodeQuotaRender(width)` 末尾追加第三行：
+  ```
+  Session 2,050,000 tokens (in 1.50M · out 200K · cache 350K)
+  ```
+- 数字格式：`fmtTok(n)` — ≥1M 用 M（≥10M 一位小数），≥1K 用 K（≥10K 整数），否则原数
+- 颜色：total 用 success 绿（保持统一），括号里用 muted 灰
+
+### 验证
+1. **逻辑层**（mock 测试）：在隔离 Node 进程注入 fake runtime + shell state，sidecar 渲染出
+   ```
+   Session 2,050,000 tokens (in 1.50M · out 200K · cache 350K)
+   ```
+   公式：1.5M + 200K + 350K = 2.05M ✓
+2. **bridge 层**（mcode TUI 实测）：`MCODE_QUOTA_DEBUG=1` 跑 mcode，render 回调日志显示
+   ```
+   [quota] render width=76 raw.valid=true session.valid=false sid=none rt=true shell=true
+   ```
+   - `rt=true` → globalThis.__mcodeRuntime 已被 setState 推上去
+   - `shell=true` → globalThis.__mcodeShellState 也被推上去
+   - `sid=none` → 当前是 welcome 屏没会话，session 行正确隐藏
+3. **launcher 语法**：`node --check` 仍然 pass
+
+### 已知边界
+- 第一次启动 mcode 还在 welcome 屏时，第三行不会出现（因为没有 sessionId）；开了会话就出现
+- session 切换时，10s 轮询会自动取新会话的数据（TTL 强制刷新）
+
+### Patch payload 更新
+- PATCH_AFTER_CTOR 长度：152 → 433 chars（增加了 setState wrap）
+- PATCH_BEFORE_CLASS_END 不变（213 chars）
+- sidecar 长度：4583 → 7448 bytes（+2865 bytes：session state + 渲染 + fetcher）

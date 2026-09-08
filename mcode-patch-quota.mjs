@@ -16,8 +16,12 @@
 //   5. Edits the launcher in two places, byte-exact:
 //        a) right after CTOR_END: insert a `static { ... }` block
 //           (ES2022 class field; the only construct that allows arbitrary
-//           statements at the class body's top level) that calls
-//           __mcodeQuotaStart with this.requestRender as the update cb.
+//           statements at the class body's top level) that:
+//              - wraps the prototype's setState to capture the widget's
+//                `runtime` and merged `shellState` to globalThis on every
+//                call, so the sidecar can use them;
+//              - calls globalThis.__mcodeQuotaStart to kick off the
+//                background fetchers (mmx quota + session tokens).
 //        b) right before WIDGET_BODY_END: insert a `render()` method
 //           that wraps super.render() and appends sidecar-rendered lines.
 //   6. Writes the mcode-quota-fetcher sidecar into the launcher chunks dir.
@@ -34,13 +38,24 @@ const FIND_ANCHORS = join(__dirname, "mcode-find-anchors.mjs");
 // ============================================================================
 // Sidecar body (kept inline to make the patcher self-contained).
 // Inlined as a const so we can `writeFileSync` it after splicing the launcher.
+//
+// Data sources:
+//   - mmx CLI: `mmx quota show --output json --quiet` → 5h + weekly remaining
+//   - mcode runtime: getSessionUsageSummary(agentSessionId) → input / output /
+//     cache_read / reasoning tokens for the current mcode session
+// Bridge: the patched static block captures the widget's `this.runtime` and
+//   the latest setState merge (`shellState`) into globalThis. The sidecar
+//   reads them to call the runtime API. No env vars, no IPC — same V8 isolate.
 // ============================================================================
 const SIDECAR_BODY = `import { spawn } from "node:child_process";
 const CACHE_TTL_MS = 60_000;
 const FETCH_TIMEOUT_MS = 5_000;
+const SESSION_TTL_MS = 10_000;
 
 let raw = { valid: false, dRem: null, dReset: "", wRem: null, wReset: "", fetchedAt: 0 };
+let session = { valid: false, total: 0, input: 0, output: 0, cache: 0, reasoning: 0, sessionId: null, fetchedAt: 0 };
 let onUpdateCb = null;
+let sessionTimer = null;
 
 const C_SUCCESS = "38;2;60;160;90";
 const C_WARNING = "38;2;200;150;40";
@@ -68,7 +83,7 @@ const fmtReset = (ms) => {
 };
 
 const colorFor = (rem) =>
-  rem == null ? C_MUTED : rem <= 10 ? C_ERROR : rem <= 30 ? C_WARNING : C_SUCCESS;
+  rem == null ? C_MUTED : rem <= 20 ? C_ERROR : rem <= 50 ? C_WARNING : C_SUCCESS;
 
 const buildBar = (rem, width) => {
   const w = Math.max(MIN_BAR_WIDTH, Math.min(MAX_BAR_WIDTH, width | 0));
@@ -98,30 +113,51 @@ function renderOne(label, rem, reset, barWidth) {
   return labelSeq + " [" + barSeq + "] " + pctSeq + tail;
 }
 
+const fmtTok = (n) => {
+  if (!Number.isFinite(n)) return "0";
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(n >= 10_000_000 ? 1 : 2) + "M";
+  if (n >= 1_000) return (n / 1_000).toFixed(n >= 10_000 ? 0 : 1) + "K";
+  return String(n);
+};
+
+function renderSessionLine(width) {
+  if (!session.valid) return null;
+  const totalStr = session.total.toLocaleString();
+  const labelSeq = "\\x1b[" + C_LABEL + "m" + "Session" + "\\x1b[" + C_RESET + "m";
+  const totalSeq = "\\x1b[" + C_SUCCESS + "m" + totalStr + "\\x1b[" + C_RESET + "m";
+  const detail = \` (in \${fmtTok(session.input)} · out \${fmtTok(session.output)} · cache \${fmtTok(session.cache)})\`;
+  const detailSeq = "\\x1b[" + C_MUTED + "m" + detail + "\\x1b[" + C_RESET + "m";
+  return labelSeq + " " + totalSeq + " tokens" + detailSeq;
+}
+
 const HORIZ_MIN_WIDTH = 88;
 
 globalThis.__mcodeQuotaRender = function (width) {
-  if (!raw.valid) return [];
   if (width == null || width < 0) width = 0;
-  if (width >= HORIZ_MIN_WIDTH) {
-    const barWidth = Math.max(12, Math.floor((width - 40) / 2));
-    const line1 = renderOne("5-hour", raw.dRem, "", barWidth);
-    const line2 = renderOne("Weekly", raw.wRem, "", barWidth);
-    const sep = "  \\x1b[" + C_MUTED + "m·\\x1b[" + C_RESET + "m  ";
-    return [line1 + sep + line2];
+  const lines = [];
+  if (raw.valid) {
+    if (width >= HORIZ_MIN_WIDTH) {
+      const barWidth = Math.max(12, Math.floor((width - 40) / 2));
+      const line1 = renderOne("5-hour", raw.dRem, "", barWidth);
+      const line2 = renderOne("Weekly", raw.wRem, "", barWidth);
+      const sep = "  \\x1b[" + C_MUTED + "m·\\x1b[" + C_RESET + "m  ";
+      lines.push(line1 + sep + line2);
+    } else {
+      const barWidth = Math.max(12, width - 38);
+      lines.push(renderOne("5-hour", raw.dRem, raw.dReset, barWidth));
+      lines.push(renderOne("Weekly", raw.wRem, raw.wReset, barWidth));
+    }
   }
-  const barWidth = Math.max(12, width - 38);
-  return [
-    renderOne("5-hour", raw.dRem, raw.dReset, barWidth),
-    renderOne("Weekly", raw.wRem, raw.wReset, barWidth),
-  ];
+  const sessionLine = renderSessionLine(width);
+  if (sessionLine) lines.push(sessionLine);
+  return lines;
 };
 
 globalThis.__mcodeQuotaStart = function (onUpdate) {
   onUpdateCb = onUpdate;
   const tick = async () => {
     if (Date.now() - raw.fetchedAt > CACHE_TTL_MS) {
-      await fetchOnce();
+      await fetchQuotaOnce();
     } else {
       onUpdateCb?.();
     }
@@ -129,6 +165,7 @@ globalThis.__mcodeQuotaStart = function (onUpdate) {
   tick();
   const id = setInterval(tick, CACHE_TTL_MS);
   if (typeof id.unref === "function") id.unref();
+  startSessionPoller();
   return id;
 };
 
@@ -149,7 +186,7 @@ const runMmx = () =>
     });
   });
 
-const fetchOnce = async () => {
+const fetchQuotaOnce = async () => {
   try {
     const payload = await runMmx();
     const g = pickGeneral(payload?.model_remains);
@@ -167,6 +204,49 @@ const fetchOnce = async () => {
     onUpdateCb?.();
   }
 };
+
+async function fetchSessionOnce() {
+  const runtime = globalThis.__mcodeRuntime;
+  const shell = globalThis.__mcodeShellState;
+  if (!runtime || !shell) return;
+  const fn = runtime.getSessionUsageSummary;
+  if (typeof fn !== "function") return;
+  const sessionId = shell.agentSessionId;
+  if (!sessionId) return;
+  // Skip if same session is still fresh
+  if (session.sessionId === sessionId && Date.now() - session.fetchedAt < SESSION_TTL_MS) return;
+  try {
+    const result = await Promise.resolve().then(() => fn.call(runtime, sessionId));
+    const summary = result?.summary;
+    if (!summary) {
+      session = { ...session, sessionId, fetchedAt: Date.now() };
+      onUpdateCb?.();
+      return;
+    }
+    const input = Number(summary.inputTokens ?? 0);
+    const output = Number(summary.outputTokens ?? 0);
+    const cache = Number(summary.cacheReadTokens ?? 0);
+    const reasoning = Number(summary.reasoningTokens ?? 0);
+    const total = input + output + cache;
+    session = {
+      valid: total > 0,
+      total, input, output, cache, reasoning,
+      sessionId,
+      fetchedAt: Date.now(),
+    };
+  } catch {
+    session = { ...session, sessionId, fetchedAt: Date.now() };
+  } finally {
+    onUpdateCb?.();
+  }
+}
+
+function startSessionPoller() {
+  if (sessionTimer) return;
+  fetchSessionOnce();
+  sessionTimer = setInterval(fetchSessionOnce, SESSION_TTL_MS);
+  if (typeof sessionTimer.unref === "function") sessionTimer.unref();
+}
 `;
 
 // ============================================================================
@@ -253,15 +333,19 @@ process.stderr.write(`[mcode-quota] anchors: BASE=${BASE} WIDGET=${WIDGET} CTOR_
 // Patch A: insert a `static { ... }` block right after the constructor body
 //   closes. `static { ... }` is the only way to run arbitrary statements at
 //   the class body's top level in ES2022 (it counts as a class field).
-//   The block calls __mcodeQuotaStart with this.requestRender as the
-//   update callback so fetcher updates trigger an mcode redraw.
+//   The block:
+//     - wraps the prototype's setState to capture the widget's
+//       `this.runtime` and merged `this.shellState` to globalThis on every
+//       setState call. The sidecar reads them to call the runtime API.
+//     - calls __mcodeQuotaStart to kick off the background fetchers
+//       (mmx quota every 60s + session tokens every 10s).
 //
 // Patch B: insert a `render()` method right before the widget class body
 //   closes. It wraps super.render() and appends the sidecar-rendered lines.
 //   Since the widget extends the base status renderer, the inherited
 //   render is called via super.render() and the result is augmented.
 //
-const PATCH_AFTER_CTOR = `static{;if(typeof globalThis.__mcodeQuotaStart==="function")globalThis.__mcodeQuotaStart(()=>{if(this.requestRender)setTimeout(()=>this.requestRender(),0)})}`;
+const PATCH_AFTER_CTOR = `static{;const _C=this;if(_C.prototype.setState&&!_C.prototype.__mcodeQ){_C.prototype.__mcodeQ=1;const _O=_C.prototype.setState;_C.prototype.setState=function(t){if(this.runtime)globalThis.__mcodeRuntime=this.runtime;const r=_O.call(this,t);if(this.shellState)globalThis.__mcodeShellState=this.shellState;return r}}if(typeof globalThis.__mcodeQuotaStart==="function")globalThis.__mcodeQuotaStart(()=>{})}`;
 
 const PATCH_BEFORE_CLASS_END = `render(e){let r=super.render(e);if(Array.isArray(r)){let _qr=typeof globalThis.__mcodeQuotaRender==="function"?globalThis.__mcodeQuotaRender(e):[];if(Array.isArray(_qr)&&_qr.length>0)return[...r,..._qr]}return r}`;
 
