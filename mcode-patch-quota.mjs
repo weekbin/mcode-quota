@@ -120,36 +120,43 @@ const fmtTok = (n) => {
   return String(n);
 };
 
-function renderSessionLine(width) {
+function renderSessionChunk() {
   if (!session.valid) return null;
-  const totalStr = session.total.toLocaleString();
   const labelSeq = "\\x1b[" + C_LABEL + "m" + "Session" + "\\x1b[" + C_RESET + "m";
-  const totalSeq = "\\x1b[" + C_SUCCESS + "m" + totalStr + "\\x1b[" + C_RESET + "m";
-  const detail = \` (in \${fmtTok(session.input)} · out \${fmtTok(session.output)} · cache \${fmtTok(session.cache)})\`;
-  const detailSeq = "\\x1b[" + C_MUTED + "m" + detail + "\\x1b[" + C_RESET + "m";
-  return labelSeq + " " + totalSeq + " tokens" + detailSeq;
+  const totalSeq = "\\x1b[" + C_SUCCESS + "m" + fmtTok(session.total) + "\\x1b[" + C_RESET + "m";
+  const dot = "\\x1b[" + C_MUTED + "m·\\x1b[" + C_RESET + "m";
+  const detail = " (in " + fmtTok(session.input) + " " + dot + " out " + fmtTok(session.output) + " " + dot + " cache " + fmtTok(session.cache) + ")";
+  return labelSeq + " " + totalSeq + detail;
 }
 
-const HORIZ_MIN_WIDTH = 88;
+const HORIZ_MIN_WIDTH = 110;
+const NARROW_MIN_WIDTH = 80;
 
 globalThis.__mcodeQuotaRender = function (width) {
   if (width == null || width < 0) width = 0;
+  const sep = "  \\x1b[" + C_MUTED + "m·\\x1b[" + C_RESET + "m  ";
+  const sess = renderSessionChunk();
   const lines = [];
   if (raw.valid) {
     if (width >= HORIZ_MIN_WIDTH) {
-      const barWidth = Math.max(12, Math.floor((width - 40) / 2));
+      const barWidth = Math.max(12, Math.floor((width - (sess ? 65 : 40)) / 2));
       const line1 = renderOne("5-hour", raw.dRem, "", barWidth);
       const line2 = renderOne("Weekly", raw.wRem, "", barWidth);
-      const sep = "  \\x1b[" + C_MUTED + "m·\\x1b[" + C_RESET + "m  ";
-      lines.push(line1 + sep + line2);
+      lines.push(line1 + sep + line2 + (sess ? sep + sess : ""));
+    } else if (width >= NARROW_MIN_WIDTH) {
+      const barWidth = Math.max(12, Math.floor((width - (sess ? 55 : 38)) / 2));
+      const weeklyBarWidth = Math.max(10, barWidth - (sess ? 6 : 0));
+      lines.push(renderOne("5-hour", raw.dRem, raw.dReset, barWidth));
+      lines.push(renderOne("Weekly", raw.wRem, raw.wReset, weeklyBarWidth) + (sess ? sep + sess : ""));
     } else {
       const barWidth = Math.max(12, width - 38);
       lines.push(renderOne("5-hour", raw.dRem, raw.dReset, barWidth));
       lines.push(renderOne("Weekly", raw.wRem, raw.wReset, barWidth));
+      if (sess) lines.push(sess);
     }
+  } else if (sess) {
+    lines.push(sess);
   }
-  const sessionLine = renderSessionLine(width);
-  if (sessionLine) lines.push(sessionLine);
   return lines;
 };
 
