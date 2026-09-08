@@ -2,6 +2,20 @@
 
 记录每次对工具集的修改。新条目加在最上面。
 
+## 2026-09-08 — 文档：新增 `DECISIONS.md`（方案与决策记录）
+
+把散落在 CHANGELOG / ARCHITECTURE 里的「考虑过哪些方案、为什么否决」集中成一份决策记录，
+共 14 条（D1–D14）：注入路径、fork 来源、锚点定位、渲染回传、两处数据源、刷新节奏、
+进程风暴防护、熔断恢复、分隔符、上下文语义/格式、排版取舍、验证方式。
+
+- 新增 `DECISIONS.md`：总览表 + 逐条「背景 / 候选 / 选择 / 理由 / 代价 / 证据」+ 否决清单 + 计划
+- README 增加文档索引；doctor 项数从 14 更正为 17，补上遗漏的自检项
+- ARCHITECTURE 顶部指向 DECISIONS
+- 更正旧文档两处过期说法：
+  - 「mcode 改混淆变量名需要重派生锚点」—— AST 结构匹配**不依赖名字**（已用 sed 模拟重命名验证），
+    只有结构变化才需要更新特征列表
+  - 伪 TTY 80 列的描述（现在是三行紧凑布局，不再是两行）
+
 ## 2026-09-08 — v2.1.2：修复单行模式丢明细
 
 ### 问题
@@ -216,7 +230,9 @@ if (raw.lastSuccessAt && Date.now() - raw.lastSuccessAt > MMX_FAILURE_RESET_MS) 
 | 0.3.0 - 0.3.9 | — | 推测可用（观察到的 0.3.10 launcher bundle 跟早期 0.2.x 锚点结构一致） |
 | 旧 0.2.x 早期（launcher-U4C3IZNL） | — | ❌ 锚点不匹配（变量名 `bc`/`tf`/`Wo`/`K_` 是更早的混淆结果）— 0.3.10 升级已切到 `Xc`/`jf`/`ma`/`J6` 体系 |
 
-**已知问题**：如果 mcode 改 launcher 内部变量名（比如 `Xc` → `Yx`），patcher 退出码 2，需要按 `MAINTENANCE.md §5` 重派生锚点。
+**已知问题**：AST 结构匹配**不依赖混淆短名**（`Xc` → `Yx` 这类重命名不影响，已用 sed 模拟验证）。
+只有当 mcode 改动状态栏的**结构**（不再继承基类、`render(width) → string[]` 契约变化）时，
+patcher 才会失败，需按 `MAINTENANCE.md §5` 更新 `mcode-find-anchors.mjs` 的特征列表。
 
 ---
 
@@ -319,6 +335,9 @@ if (raw.lastSuccessAt && Date.now() - raw.lastSuccessAt > MMX_FAILURE_RESET_MS) 
 ---
 
 ## 未来可能的工作
+
+> **已迁移**：计划清单现维护在 [`DECISIONS.md §4 计划`](DECISIONS.md#4-计划)（含已完成 / 待办 / 观察中）。
+> 下面这份是早期版本，保留作历史记录。
 
 - [ ] 把 `mcode-quota/` 纳入 git 版本管理（**已完成** — 4 个 commit，0.3.10 / v1.4 / v1.5）
 - [x] 把锚点查找自动化（v1.4 AST 通用匹配）

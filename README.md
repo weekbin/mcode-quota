@@ -97,9 +97,9 @@ CJK 字符按 2 列计算宽度。**明细优先于行数**——只有连一整
 ├── mcodex                       # 入口 wrapper
 ├── mcode-patch-quota.mjs        # 构建 fork + 打 patch + 生成 sidecar
 ├── mcode-find-anchors.mjs       # acorn AST 锚点发现器
-├── mcode-quota-doctor           # 自检（14 项）
+├── mcode-quota-doctor           # 自检（17 项）
 ├── sidecar/                     # patcher 生成的 sidecar（不要手改）
-└── README / ARCHITECTURE / MAINTENANCE / CHANGELOG
+└── README / ARCHITECTURE / DECISIONS / MAINTENANCE / CHANGELOG
 
 ~/.minimax/bin/mcodex                                            # PATH 入口（250 字节 stub）
 ~/.local/share/mcode-quota/mcode-clone/tarballs/                 # 官方 tarball 缓存
@@ -166,4 +166,15 @@ mcode-quota-doctor
 - 首次渲染时 quota 行可能先空约 1–6s，数据到达后自动重绘
 - 24-bit 颜色需要终端支持（现代终端都支持）
 - `mmx` 是外部依赖：不在 PATH 或未登录时，只显示会话 tokens / 上下文行
-- `script -qfc` 伪 TTY 默认 80 列，自动化测试通常看到两行布局
+- 自动化测试用 `script -qfc` 起的伪 TTY 默认 80 列，会落到三行紧凑布局；
+  想看单行带明细的效果，用真实终端或把 pty 窗口设成 ≥150 列
+
+## 文档
+
+| 文档 | 内容 |
+|---|---|
+| [README.md](README.md) | 怎么用、效果、数据源、trade-off |
+| [ARCHITECTURE.md](ARCHITECTURE.md) | 隔离架构、两处 patch、sidecar 数据流、排版 |
+| [DECISIONS.md](DECISIONS.md) | **方案与决策记录**：每个设计问题的候选、选择、理由、代价、证据 |
+| [MAINTENANCE.md](MAINTENANCE.md) | 故障诊断、重派生锚点、还原 mcode |
+| [CHANGELOG.md](CHANGELOG.md) | 每次改动记录 |

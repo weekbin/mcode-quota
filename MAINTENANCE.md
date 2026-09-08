@@ -72,7 +72,7 @@ patcher 失败 → **自动回退到未打 patch 的官方 mcode**，不会卡�
 /home/weekbin/orca/projects/mcode/mcode-quota/mcode-quota-doctor
 ```
 
-期望 `14 ok, 0 warnings, 0 failures`。关键项：
+期望 `17 ok, 0 warnings, 0 failures`。关键项：
 
 ```
 [ok] mcode launcher pristine (no quota hooks)
@@ -80,8 +80,13 @@ patcher 失败 → **自动回退到未打 patch 的官方 mcode**，不会卡�
 [ok] fork launcher render hook present
 [ok] fork cli.js imports sidecar statically
 [ok] mcodex does not use NODE_OPTIONS
+[ok] session breakdown kept at 140 cols
+[ok] context usage: 上下文 42K/200K 21%
+[ok] separator is │ (U+2502)
 [ok] no mmx process storm (concurrent: 0)
 ```
+
+（`MCODE_QUOTA_TAIL=compact` 时「session breakdown」一项会从 ok 降为 info，属预期。）
 
 ---
 
@@ -263,4 +268,4 @@ mcode 本体从未被修改，卸载后 `mcode` 照常工作。
 - fork 每版本约 62MB 真实拷贝（换掉 realpath 陷阱）
 - sidecar 路径写死在 fork 的 `cli.js`；移动项目目录需重跑 patcher（`mcodex` 自动处理）
 - `mmx` 输出 schema 变化时需更新 `fetchQuotaOnce` 里的字段名
-- `script` 伪 TTY 默认 80 列，自动化测试通常看到两行布局
+- `script` 伪 TTY 默认 80 列，自动化测试会看到三行紧凑布局（明细放不下）；想看单行带明细需 ≥150 列

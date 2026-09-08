@@ -1,6 +1,7 @@
 # Architecture — mcodex 隔离架构
 
 本文解释 mcodex 如何在不修改 mcode 本体的前提下，把配额 / token 行注入 TUI 状态栏。
+**「为什么选这个方案、否决了哪些」见 [DECISIONS.md](DECISIONS.md)**，本文只讲实现。
 
 ## 0. 总原则
 
