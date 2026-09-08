@@ -216,9 +216,14 @@ async function fetchSessionOnce() {
   // Skip if same session is still fresh
   if (session.sessionId === sessionId && Date.now() - session.fetchedAt < SESSION_TTL_MS) return;
   try {
-    const result = await Promise.resolve().then(() => fn.call(runtime, sessionId));
-    const summary = result?.summary;
-    if (!summary) {
+    // runtime.getSessionUsageSummary(sessionId) returns the summary object
+    // DIRECTLY (not wrapped in {summary, ...}). See chunk-CTHP2I62.js
+    // getSessionUsageSummary -> applications.session.content.getSessionUsageSummary
+    //   -> usage.summarizeSession -> store.summarizeBySession (raw row → cE(row))
+    // cE returns {inputTokens, outputTokens, reasoningTokens, cacheReadTokens,
+    //   cacheWriteTokens, totalTokens, costUsd, turns}.
+    const summary = await Promise.resolve().then(() => fn.call(runtime, sessionId));
+    if (!summary || typeof summary !== "object") {
       session = { ...session, sessionId, fetchedAt: Date.now() };
       onUpdateCb?.();
       return;
@@ -229,9 +234,10 @@ async function fetchSessionOnce() {
     const reasoning = Number(summary.reasoningTokens ?? 0);
     const total = input + output + cache;
     session = {
-      valid: total > 0,
+      valid: true,
       total, input, output, cache, reasoning,
       sessionId,
+      turns: Number(summary.turns ?? 0),
       fetchedAt: Date.now(),
     };
   } catch {
