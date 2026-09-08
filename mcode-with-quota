@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# Launch mcode TUI with the quota status line enabled.
+# This is a thin wrapper that sets NODE_OPTIONS before exec'ing the real mcode.
+# It does NOT touch mcode itself; re-run mcode-patch-quota.sh after `mcode update`.
+set -euo pipefail
+
+# Resolve current mcode release (the patcher re-resolves on every run, so
+# we mirror that here — but we cache per release for a single session).
+CODE_ROOT="${MCODE_CODE_ROOT:-$HOME/.minimax-code}"
+CURRENT_FILE="$CODE_ROOT/current"
+if [[ ! -f "$CURRENT_FILE" ]]; then
+  echo "mcode current pointer not found: $CURRENT_FILE" >&2
+  exit 1
+fi
+CURRENT_VERSION="$(tr -d '\r\n' < "$CURRENT_FILE")"
+SIDECAR="$CODE_ROOT/releases/$CURRENT_VERSION/lib/node_modules/@minimax-ai/code/chunks/mcode-quota-fetcher-9f8a7b.mjs"
+
+if [[ ! -f "$SIDECAR" ]]; then
+  echo "Sidecar not found: $SIDECAR" >&2
+  echo "Run ~/.minimax/bin/mcode-patch-quota.sh first to install it." >&2
+  exit 2
+fi
+
+# Prepend our --import so user-supplied NODE_OPTIONS still take effect.
+export NODE_OPTIONS="--import=$SIDECAR ${NODE_OPTIONS:-}"
+
+# Hand off to the real mcode (resolved via PATH; the same one `mcode` runs).
+exec mcode "$@"
