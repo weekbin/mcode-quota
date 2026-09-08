@@ -92,6 +92,8 @@ patcher 失败 → **自动回退到未打 patch 的官方 mcode**，不会卡�
 | `mcodex` 启动后是**原版界面**（无 quota 行） | patcher 失败已回退 | `MCODE_QUOTA_DEBUG=1 mcodex` 看 stderr |
 | quota 行完全不显示 | sidecar 未加载 / fork 未建 | 跑 doctor；确认 `fork cli.js imports sidecar` 为 ok |
 | 只有会话 tokens，无 5小时/周 | `mmx` 不在 PATH 或未登录 | `which mmx`；`mmx auth status` |
+| 无 上下文 字段 | 该会话还没产生 `contextSnapshot`（新会话、或 runtime 未就绪） | 正常；跑完一个 turn 后自动出现。doctor 用合成快照单独验证该路径 |
+| 上下文百分比与 `/context` 对不上 | 两者取数时点不同（这里是渲染时实时读 shellState） | 以 `/context` 详情为准，差异应在一次渲染周期内收敛 |
 | 会话 tokens 恒为 0 | runtime 与 sqlite 都无该会话数据 | 确认会话有完成的 turn；`SELECT * FROM local_runtime_token_usage WHERE session_id=...` |
 | doctor 报 `mcode launcher is PATCHED` | 历史遗留污染 | 用 npm tarball 覆盖该 launcher（见 §6） |
 | doctor 报 fork 相关 FAIL | fork 半成品 | 删掉 fork 目录，重跑 `mcodex` |
@@ -208,10 +210,13 @@ const NARROW_MIN_WIDTH = 80;
 ### 7.4 刷新节奏
 
 ```js
-const CACHE_TTL_MS = 60_000;      // quota 轮询间隔
-const SESSION_TTL_MS = 10_000;    // 会话 token 轮询间隔
-const FETCH_TIMEOUT_MS = 20_000;  // mmx 单次超时
+const CACHE_TTL_MS = Number(process.env.MCODE_QUOTA_TTL_MS || 60_000);       // quota 轮询间隔
+const SESSION_TTL_MS = 10_000;                                                // 会话 token 轮询间隔
+const FETCH_TIMEOUT_MS = 20_000;                                              // mmx 单次超时
+const MMX_FAILURE_RESET_MS = Number(process.env.MCODE_QUOTA_MMX_COOLDOWN_MS || 5 * 60_000);  // 熔断冷却
 ```
+
+两个环境变量只为测试而存在（缩短到秒级），生产不要设置。
 
 ### 7.5 文案
 
@@ -219,7 +224,15 @@ const FETCH_TIMEOUT_MS = 20_000;  // mmx 单次超时
 const L_LABEL_5H = "5小时使用量";
 const L_LABEL_WEEK = "周使用量";
 const L_LABEL_SESSION = "会话 tokens";
+const L_CONTEXT = "上下文";        // 已用占比，≥75% 暗橙、≥90% 暗红
+const L_IN = "输入";
+const L_OUT = "输出";
+const L_CACHE = "缓存";
+const L_LEFT = "剩余";
+const L_RESET = "重置";
 ```
+
+分隔符为 `│`（U+2502），定义在 `dot()` 与 `SEP`。
 
 ---
 

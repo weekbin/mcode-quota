@@ -115,6 +115,7 @@ const L_NO_DATA = "\u65e0\u6570\u636e";                           // 无数据
 const L_IN = "\u8f93\u5165";                                      // 输入
 const L_OUT = "\u8f93\u51fa";                                     // 输出
 const L_CACHE = "\u7f13\u5b58";                                   // 缓存
+const L_CONTEXT = "\u4e0a\u4e0b\u6587";                           // 上下文
 
 const ESC = "\\u001b[";
 const RESET_SEQ = ESC + C_RESET + "m";
@@ -175,7 +176,7 @@ const pickGeneral = (rows) =>
 
 const label = (s) => ESC + C_LABEL + "m" + s + RESET_SEQ;
 const muted = (s) => ESC + C_MUTED + "m" + s + RESET_SEQ;
-const dot = () => muted("\\u00b7");
+const dot = () => muted("\\u2502");
 
 function renderOne(text, rem, reset, barWidth) {
   if (rem == null) return label(text) + "  " + muted("(" + L_NO_DATA + ")");
@@ -193,9 +194,10 @@ const fmtTok = (n) => {
   return String(n);
 };
 
-function renderSessionChunk() {
+function renderSessionChunk(compact) {
   if (!session.valid) return null;
   const totalSeq = ESC + C_SUCCESS + "m" + fmtTok(session.total) + RESET_SEQ;
+  if (compact) return label(L_LABEL_SESSION) + " " + totalSeq;
   const d = " " + dot() + " ";
   const detail = " (" + L_IN + " " + fmtTok(session.input) + d +
                  L_OUT + " " + fmtTok(session.output) + d +
@@ -203,7 +205,34 @@ function renderSessionChunk() {
   return label(L_LABEL_SESSION) + " " + totalSeq + detail;
 }
 
-const SEP = "  " + ESC + C_MUTED + "m\\u00b7" + RESET_SEQ + "  ";
+// Context budget. mcode already keeps this in the shell state it feeds its own
+// "Context N% left" indicator: contextUsage is the runtime context snapshot
+// ({ usedTokens, contextWindowTokens }), with the model window as a fallback.
+function readContextUsage() {
+  const sh = globalThis.__mcodeShellState;
+  if (!sh) return null;
+  const cu = sh.contextUsage;
+  if (!cu || !Number.isFinite(cu.usedTokens)) return null;
+  const win = Number.isFinite(cu.contextWindowTokens) && cu.contextWindowTokens > 0
+    ? cu.contextWindowTokens
+    : (Number.isFinite(sh.contextWindowTokens) && sh.contextWindowTokens > 0
+        ? sh.contextWindowTokens
+        : null);
+  if (!win) return null;
+  const used = Math.max(0, Math.min(cu.usedTokens, win));
+  return { used, window: win, pct: Math.round((used / win) * 100) };
+}
+
+function renderContextChunk() {
+  const c = readContextUsage();
+  if (!c) return null;
+  // Mirrors mcode's own "Context N% left" thresholds, inverted to used-percent:
+  // warn at 75% used, error at 90% used (25% / 10% left).
+  const col = c.pct >= 90 ? C_ERROR : c.pct >= 75 ? C_WARNING : C_SUCCESS;
+  return label(L_CONTEXT) + " " + ESC + col + "m" + c.pct + "%" + RESET_SEQ;
+}
+
+const SEP = "  " + ESC + C_MUTED + "m\\u2502" + RESET_SEQ + "  ";
 const HORIZ_MIN_WIDTH = 110;
 const NARROW_MIN_WIDTH = 80;
 
@@ -218,7 +247,18 @@ function fit(build, width) {
 
 globalThis.__mcodeQuotaRender = function (width) {
   if (width == null || !Number.isFinite(width) || width < 0) width = 0;
-  const sess = renderSessionChunk();
+  // 会话 tokens and 上下文 share one tail so either can render without the other.
+  const buildTail = (compact) => {
+    const parts = [renderSessionChunk(compact), renderContextChunk()].filter(Boolean);
+    return parts.join(SEP);
+  };
+  // Prefer the full breakdown; fall back to the compact form when the terminal
+  // is too narrow for it.
+  const tailFor = (w) => {
+    const full = buildTail(false);
+    if (dw(full) <= w) return full;
+    return buildTail(true);
+  };
   const lines = [];
   if (raw.valid) {
     // Horizontal omits reset times to save room; the other layouts keep them.
@@ -227,25 +267,39 @@ globalThis.__mcodeQuotaRender = function (width) {
     const q5 = (bar) => renderOne(L_LABEL_5H, raw.dRem, raw.dReset, bar);
     const qw = (bar) => renderOne(L_LABEL_WEEK, raw.wRem, raw.wReset, bar);
 
-    if (width >= HORIZ_MIN_WIDTH) {
-      lines.push(fit((bar) => q5h(bar) + SEP + qwh(bar) + (sess ? SEP + sess : ""), width));
-    } else if (width >= NARROW_MIN_WIDTH) {
-      lines.push(fit(q5, width));
-      const combined = fit((bar) => qw(bar) + (sess ? SEP + sess : ""), width);
-      if (dw(combined) <= width) {
-        lines.push(combined);
+    const narrow = () => {
+      const tail = tailFor(width);
+      if (width >= NARROW_MIN_WIDTH) {
+        lines.push(fit(q5, width));
+        const combined = fit((bar) => qw(bar) + (tail ? SEP + tail : ""), width);
+        if (dw(combined) <= width) {
+          lines.push(combined);
+        } else {
+          // Weekly + tail still do not fit together: split onto 3 lines.
+          lines.push(fit(qw, width));
+          if (tail) lines.push(tail);
+        }
       } else {
-        // Weekly + session still do not fit together: split onto 3 lines.
+        lines.push(fit(q5, width));
         lines.push(fit(qw, width));
-        if (sess) lines.push(sess);
+        if (tail) lines.push(tail);
       }
+    };
+
+    if (width >= HORIZ_MIN_WIDTH) {
+      // Single line is the at-a-glance mode, so it uses the compact tail.
+      const tail = buildTail(true);
+      const horiz = fit((bar) => q5h(bar) + SEP + qwh(bar) + (tail ? SEP + tail : ""), width);
+      // The context chunk can push the single line past the terminal even at the
+      // minimum bar width — degrade to the narrow layout instead of overflowing.
+      if (dw(horiz) <= width) lines.push(horiz);
+      else narrow();
     } else {
-      lines.push(fit(q5, width));
-      lines.push(fit(qw, width));
-      if (sess) lines.push(sess);
+      narrow();
     }
-  } else if (sess) {
-    lines.push(sess);
+  } else {
+    const tail = tailFor(width);
+    if (tail) lines.push(tail);
   }
   // First render is a reliable "this is the real TUI" signal — start then.
   if (!started) start();

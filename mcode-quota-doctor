@@ -118,7 +118,10 @@ if [[ -f "$SIDECAR" ]]; then
         } catch { return ""; }
       })();
       await import(process.env.SIDECAR);
-      globalThis.__mcodeShellState = { agentSessionId: sid };
+      globalThis.__mcodeShellState = {
+        agentSessionId: sid,
+        contextUsage: { usedTokens: 42000, contextWindowTokens: 200000 },
+      };
       globalThis.__mcodeQuotaRender(140);
       await new Promise((r) => setTimeout(r, 6000));
       process.stdout.write(globalThis.__mcodeQuotaRender(140).join("\n"));
@@ -131,9 +134,19 @@ if [[ -f "$SIDECAR" ]]; then
     warn "live render produced no quota line (mmx may be down). Raw: $(printf '%s' "$CLEAN" | head -c120)"
   fi
   if printf '%s' "$CLEAN" | grep -q "会话 tokens"; then
-    ok "session tokens line: $(printf '%s' "$CLEAN" | grep -o '会话 tokens [^·]*' | head -1 | cut -c1-60)"
+    ok "session tokens line: $(printf '%s' "$CLEAN" | grep -o '会话 tokens[^│]*' | head -1 | cut -c1-60)"
   else
     info "session tokens line not present (no session row yet?)"
+  fi
+  if printf '%s' "$CLEAN" | grep -q "上下文 21%"; then
+    ok "context usage line: $(printf '%s' "$CLEAN" | grep -o '上下文 [0-9]*%' | head -1)"
+  else
+    warn "context usage chunk missing (expected 上下文 21%)"
+  fi
+  if printf '%s' "$CLEAN" | grep -q "│"; then
+    ok "separator is │ (U+2502)"
+  else
+    warn "separator is not │"
   fi
 fi
 

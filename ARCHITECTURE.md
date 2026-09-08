@@ -127,12 +127,26 @@ __mcodeQuotaRender(width) → 按宽度排版 → Ink 写 stdout
 ### 3.3 排版
 
 - `dw(s)`：去 ANSI 后按 CJK=2 列计算显示宽度
-- 宽 ≥110：单行横排（省略重置时间）
-- 80–109：两行；周行尝试与会话行合并，放不下则拆成第三行
+- 宽 ≥110：单行横排（省略重置时间；tail 用紧凑形式，省略输入/输出/缓存明细）
+- 80–109：两行；周行尝试与 tail 合并，放不下则拆成第三行
 - <80：三行
 - 每个 `fit()` 从 20 字符进度条开始向下收缩到 8，直到整行不超宽
+- 单行放不下时（加进上下文后可能超过终端）自动降级到多行布局，不会溢出
+- `tailFor(width)`：tail 先尝试带明细的完整形式，超宽则退化为紧凑形式（只留总量）
 
-### 3.4 会话 token 兜底
+### 3.4 上下文使用率
+
+```js
+const cu = globalThis.__mcodeShellState?.contextUsage;   // { usedTokens, contextWindowTokens }
+const win = cu.contextWindowTokens || shellState.contextWindowTokens;
+pct = Math.round(Math.min(cu.usedTokens, win) / win * 100);   // 已用占比
+```
+
+- 数据与 mcode 原生 `Context N% left` 指示器同源，渲染时实时读取，无需额外轮询
+- 阈值对齐 mcode（其按"剩余"判定 10% / 25%），这里取补数：≥75% 暗橙、≥90% 暗红
+- 快照缺失（新会话尚未产生 contextSnapshot）时该字段整块不渲染，不影响其他行
+
+### 3.5 会话 token 兜底
 
 ```js
 if (!summary || sumTotal(summary) === 0) {
@@ -178,4 +192,4 @@ mcode 升级后：
 - fork 每个版本占约 62MB（真实拷贝，换来无 realpath 陷阱）
 - sidecar 路径写死在 fork 的 `cli.js` 里；若移动项目目录，需重跑 patcher（`mcodex` 会自动检测并重写）
 - 24-bit 颜色需要终端支持
-- `mmx` 是外部依赖，未登录时只显示会话 tokens
+- `mmx` 是外部依赖，未登录时只显示会话 tokens / 上下文
