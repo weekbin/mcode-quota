@@ -1,6 +1,6 @@
 {
   "name": "mcode-quota",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "mcodex — fork-isolated quota + session token status bar for mcode",
   "main": "mcode-patch-quota.mjs",
   "scripts": {

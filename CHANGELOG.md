@@ -2,6 +2,31 @@
 
 记录每次对工具集的修改。新条目加在最上面。
 
+## 2026-09-08 — v2.0.1：修复 mmx 熔断永不恢复
+
+**背景**：用 `mcodex` 起的会话实测排查僵尸进程 / MainThread 反复拉起时发现，
+`fetchQuotaOnce` 的失败熔断恢复逻辑有缺陷。
+
+**缺陷**：冷却判定锚在 `raw.lastSuccessAt` 上：
+
+```js
+if (raw.lastSuccessAt && Date.now() - raw.lastSuccessAt > MMX_FAILURE_RESET_MS) { ... }
+```
+
+若会话启动时 mmx 连续失败 5 次而**从未成功过**，`lastSuccessAt` 恒为 0，
+条件永远为假 → 直接 `return`，配额行直到 mcode 重启都不会再尝试。
+即「启动时遇到 5 分钟 mmx 故障 = 本次会话配额行永久空白」。
+
+**修复**：改为在熔断触发瞬间记录冷却截止时间 `mmxDisabledUntil`，
+冷却到期即重试，与「是否曾成功」解耦。
+
+- `let mmxDisabledUntil = 0;`，熔断时 `mmxDisabledUntil = Date.now() + MMX_FAILURE_RESET_MS`
+- 入口判定改为 `if (Date.now() < mmxDisabledUntil) return;` 然后重置计数
+
+**可测试性**：`CACHE_TTL_MS` 与 `MMX_FAILURE_RESET_MS` 支持环境变量覆盖
+（`MCODE_QUOTA_TTL_MS` / `MCODE_QUOTA_MMX_COOLDOWN_MS`），生产默认值不变。
+回归测试实测：5 次失败 → 熔断 → 冷却期 0 次调用 → 冷却后恢复并渲染 79%。
+
 ## 2026-09-08 — v2.0.0：fork 隔离架构 + mcodex
 
 **背景**：v1.x 直接 patch mcode 本体的 launcher，一旦 patch 有 bug，
