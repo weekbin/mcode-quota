@@ -101,3 +101,34 @@
 - [ ] 添加图标（用 nerd font 或 emoji 装饰标签 / 进度条）
 - [ ] 把锚点查找自动化（脚本能自动定位 `Xc.render` + `jf.constructor` 而不依赖固定字符串匹配）
 - [ ] 多个 TUI 实例同时跑时 sidecar 共享（目前每个 mcode 进程独立 fork mmx）
+
+### v1.4 — Universal AST-based patcher (no hardcoded short names)
+
+**Motivation**: previous v1.3 hardcoded the obfuscated short names `Xc` (base class) and `jf` (widget class) as literal strings in `RENDER_ANCHOR` / `WIDGET_ANCHOR` / `RENDER_PATCH` / `WIDGET_PATCH`. If the minifier produced different short names on a future mcode build, the patcher would fail to match. The user's "特征匹配是如何做到的呢" question prompted this rewrite.
+
+**Solution**: structural matching with brace counting (no AST parser required). New `mcode-find-anchors.mjs` script:
+- Finds every `Name = class [extends Base]? {` position in the launcher bundle
+- For each, brace-counts to find the class body
+- BASE class: has a `render(<param>)` method whose body contains `["", <expr>]` (the mcode status bar layout)
+- WIDGET class: extends BASE, constructor has all 5 state-init features:
+    `super(...)` + `this.runtime = ...` + `this.requestRender = ...` + `this.statusLineItems = ...` + `setInterval(...)`
+- Locator also reports `WIDGET_BODY_END` and `CTOR_END` (byte offsets within the class body)
+
+**New patcher** (`mcode-patch-quota.mjs`, replaces the .sh version):
+- Calls the anchor finder; receives the obfuscated short names dynamically
+- Inserts two byte-exact patches into the launcher:
+  - **Patch A**: a `static { ... }` block right after the constructor closes (the ONLY construct allowed in ES2022 class-body top level that runs arbitrary statements) — calls `__mcodeQuotaStart(this.requestRender)`
+  - **Patch B**: a `render(e) { ... }` method right before the widget class body closes — calls `super.render(e)` and appends sidecar lines
+- Verifies the result with `node --check`; rolls back on failure
+- Writes the sidecar as an inline `const SIDECAR_BODY` (no external template file)
+
+**Verified**: simulated minifier rename (Xc→Yx, jf→kw via sed) was correctly discovered as `BASE='Yx' WIDGET='kw'`. Direct mcode TUI render at 160 cols confirmed horizontal layout still works.
+
+**Files**:
+- New: `mcode-find-anchors.mjs`, `mcode-patch-quota.mjs`
+- Removed: `mcode-patch-quota.sh` (the old bash+perl+literal-string version)
+- `mcode-with-quota` and `mcode-quota-doctor` unchanged
+
+**Patch payload sizes** (no longer depend on internal short names like `X6`, `J6`, `t3`, `xe`, `o3`):
+- PATCH_AFTER_CTOR = `static{;if(typeof globalThis.__mcodeQuotaStart==="function")globalThis.__mcodeQuotaStart(()=>{if(this.requestRender)setTimeout(()=>this.requestRender(),0)})}`  (152 chars)
+- PATCH_BEFORE_CLASS_END = `render(e){let r=super.render(e);if(Array.isArray(r)){let _qr=typeof globalThis.__mcodeQuotaRender==="function"?globalThis.__mcodeQuotaRender(e):[];if(Array.isArray(_qr)&&_qr.length>0)return[...r,..._qr]}return r}`  (213 chars)
