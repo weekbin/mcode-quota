@@ -138,6 +138,13 @@ if [[ -f "$SIDECAR" ]]; then
   else
     info "session tokens line not present (no session row yet?)"
   fi
+  if printf '%s' "$CLEAN" | grep -q "输入"; then
+    ok "session breakdown kept at 140 cols: $(printf '%s' "$CLEAN" | grep -o '输入 [^)]*' | head -1 | cut -c1-52)"
+  elif [[ "${MCODE_QUOTA_TAIL:-}" == "compact" ]]; then
+    info "session breakdown omitted (MCODE_QUOTA_TAIL=compact)"
+  else
+    warn "session breakdown missing at 140 cols (expected 输入/输出/缓存)"
+  fi
   if printf '%s' "$CLEAN" | grep -q "上下文 42K/200K 21%"; then
     ok "context usage: $(printf '%s' "$CLEAN" | grep -o '上下文 [^ ]* [0-9]*%' | head -1)"
   else

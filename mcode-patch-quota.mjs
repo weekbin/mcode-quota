@@ -240,6 +240,13 @@ function renderContextChunk() {
 const SEP = "  " + ESC + C_MUTED + "m\\u2502" + RESET_SEQ + "  ";
 const HORIZ_MIN_WIDTH = 110;
 const NARROW_MIN_WIDTH = 80;
+// Whether the single-line layout may drop the 输入/输出/缓存 breakdown to stay on
+// one row. Default "full": keep the breakdown and let the line wrap instead —
+// the numbers are more useful than saving a row. "compact" restores the old
+// one-line-at-any-cost behaviour.
+const TAIL_MODE = String(process.env.MCODE_QUOTA_TAIL || "").toLowerCase() === "compact"
+  ? "compact"
+  : "full";
 
 // Render a single quota line at the widest bar that still fits the width.
 function fit(build, width) {
@@ -292,8 +299,9 @@ globalThis.__mcodeQuotaRender = function (width) {
     };
 
     if (width >= HORIZ_MIN_WIDTH) {
-      // Single line is the at-a-glance mode, so it uses the compact tail.
-      const tail = buildTail(true);
+      // Keep the breakdown whenever the row can hold it; only a "compact" tail
+      // request drops it up front.
+      const tail = TAIL_MODE === "compact" ? buildTail(true) : tailFor(width);
       const horiz = fit((bar) => q5h(bar) + SEP + qwh(bar) + (tail ? SEP + tail : ""), width);
       // The context chunk can push the single line past the terminal even at the
       // minimum bar width — degrade to the narrow layout instead of overflowing.

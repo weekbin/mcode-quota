@@ -214,9 +214,15 @@ const CACHE_TTL_MS = Number(process.env.MCODE_QUOTA_TTL_MS || 60_000);       // 
 const SESSION_TTL_MS = 10_000;                                                // 会话 token 轮询间隔
 const FETCH_TIMEOUT_MS = 20_000;                                              // mmx 单次超时
 const MMX_FAILURE_RESET_MS = Number(process.env.MCODE_QUOTA_MMX_COOLDOWN_MS || 5 * 60_000);  // 熔断冷却
+const TAIL_MODE = String(process.env.MCODE_QUOTA_TAIL || "").toLowerCase() === "compact"
+  ? "compact" : "full";                                                       // 单行是否可丢明细
 ```
 
-两个环境变量只为测试而存在（缩短到秒级），生产不要设置。
+前两个环境变量只为测试而存在（缩短到秒级），生产不要设置。
+`MCODE_QUOTA_TAIL` 是给用户的排版开关：
+
+- 不设置 / `full`（默认）— 单行放不下明细时**宁可换行也保留** `输入/输出/缓存`
+- `compact` — 单行优先，放不下时**丢掉明细**保住一行（v2.1.0 的行为）
 
 ### 7.5 文案
 
