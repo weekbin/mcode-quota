@@ -1,318 +1,181 @@
-# Architecture — mcode quota patch 原理
+# Architecture — mcodex 隔离架构
 
-这份文档解释 **mcode-patch-quota.sh 是怎么工作的**、**锚点匹配逻辑是什么**、以及 **mcode 升级后怎么继续维护**。
+本文解释 mcodex 如何在不修改 mcode 本体的前提下，把配额 / token 行注入 TUI 状态栏。
 
-## 0. 背景：mcode TUI 是什么
+## 0. 总原则
 
-mcode 是用 [Ink](https://github.com/vadimdemedes/ink)（React for CLI）写的 TUI 应用。TypeScript 源码经 esbuild 打包成 chunks bundle（`chunks/launcher-*.js` 等），Node.js 在用户终端上跑这个 bundle。
+| 原则 | 实现 |
+|---|---|
+| mcode 本体只读 | 从不写 `~/.minimax-code/**`；doctor 校验其与 npm 官方包字节一致 |
+| 补丁只落在私有 fork | `~/.local/share/mcode-quota/mcode-clone/<版本>/code/` |
+| fork 来源必须干净 | 从 npm registry 下载官方 tarball 解压，**不是**复制已安装目录 |
+| fork 必须是真实拷贝 | 不用 symlink（Node 默认 realpath，会把相对 import 指回源安装，patch 失效） |
+| 可随时推倒重建 | 删掉 fork 目录，下次 `mcodex` 自动重建 |
 
-TUI 是 React 组件树：
+## 1. 目录与来源
 
 ```
-Ink render(root)
-  └─ Launcher
-      ├─ Welcome / Transcript
-      ├─ Status bar       ← parts.status
-      ├─ Activity bar     ← parts.activity
-      ├─ Composer         ← parts.composer (输入框)
-      ├─ Tasks / Goal / Interaction / FollowUp / Notice
-      └─ Footer
+~/.local/share/mcode-quota/mcode-clone/
+├── tarballs/minimax-ai-code-<v>.tgz      # npm pack 缓存（官方 tarball）
+├── .pristine-<v>/                        # 解压结果（--strip-components=1）
+└── <v>/
+    ├── .fork-marker                      # 版本 + 来源 + tarball sha256
+    └── code/                             # 真实拷贝 + 打了 patch
+        ├── cli.js                        # ← patch 2
+        └── chunks/launcher-*.js          # ← patch 1
 ```
 
-每个 `parts.xxx` 是个 widget 类，统一实现 **`{ render(width): string[] }` 接口**：
-- 接收 TUI 当前 content width
-- 返回一个 string 数组，每个元素是一行
-- Ink 把这些行写进 stdout → 用户看到 TUI
+获取顺序（`ensurePristine()`）：
 
-Launcher 在 `launcher-U4C3IZNL.js` / `launcher-CVR77P3I.js` 等 bundle 文件里。
+1. 命中 `tarballs/*.tgz` 缓存 → 直接解压
+2. 否则 `npm pack @minimax-ai/code@<版本> --registry=https://registry.npmjs.org/`
+3. 网络不可用（或 `--offline`）→ 回退到已安装 release 目录，但**先校验其 launcher 无 quota 痕迹**，
+   否则拒绝（绝不允许拿被污染的源码去 fork）
 
-## 1. 锚点 1 — `Xc` (base class for status)
+`npm` tarball 不含 `node_modules/`，所以建 fork 时会从已安装目录**拷贝**一份
+（真实拷贝，不与原安装共享 inode）。
 
-### 1.1 原始代码（unpatched）
+## 2. 两处 patch
+
+### 2.1 patch 1 — launcher chunk：`render()` 覆盖
+
+mcode TUI 的状态栏 widget 是 `jf`（混淆短名），继承基类 `Xc`。
+原版 `jf` **没有自己的 `render`**，直接用基类的。我们在 `jf` 类体末尾插入一个 `render` 覆盖：
 
 ```js
-Xc=class{
-  constructor(e){this.state=e}
-  setState(e){this.state=e}
-  invalidate(){}
-  render(e){                       // e = TUI content width
-    let t=ma(e);
-    if(t===0)return[];
-    let i=X6(this.state);
-    if(i.length===0)return[];
-    let s=i.map(o=>J6(o,this.state)).filter(o=>o!==void 0);
-    if(s.length===0)return[];
-    let r=t3(s,t);
-    return xe(r).trim()?["",r]:[]   // ← 关键: [空行, 渲染好的内容]
-  }
-}
-```
-
-### 1.2 Patch 后的代码
-
-```js
-Xc=class{
-  constructor(e){this.state=e}
-  setState(e){this.state=e}
-  invalidate(){}
-  render(e){
-    let t=ma(e);
-    if(t===0)return[];
-    let i=X6(this.state);
-    if(i.length===0)return[];
-    let s=i.map(o=>J6(o,this.state)).filter(o=>o!==void 0);
-    if(s.length===0)return[];
-    let r=t3(s,t);
-    if(!xe(r).trim())return[];
-
-    // ↓↓↓ 注入: 追加 sidecar 提供的 quota 行 ↓↓↓
+render(e){
+  let r=super.render(e);
+  if(this&&this.runtime)globalThis.__mcodeRuntime=this.runtime;
+  if(this&&this.shellState)globalThis.__mcodeShellState=this.shellState;
+  globalThis.__mcodeQuotaWidget=this;
+  if(Array.isArray(r)){
     let _qr=typeof globalThis.__mcodeQuotaRender==="function"
-      ?globalThis.__mcodeQuotaRender(e)
+      ?globalThis.__mcodeQuotaRender(e)   // e = content width
       :[];
-    if(!Array.isArray(_qr)||_qr.length===0)return["",r];
-    return["",r,..._qr];           // ← 关键: 展开多行 quota
+    if(Array.isArray(_qr)&&_qr.length>0)return[...r,..._qr]
   }
+  return r
 }
 ```
 
-**只改了一处**：把 `return ...trim()?["",r]:[]` 替换成新版。**`Xc` 类名、`render(e)` 签名、`["",r]` 返回形态都保留**。
+作用：
+- 把 `runtime` / `shellState` 暴露给 sidecar（sidecar 需要 `agentSessionId` 和 runtime API）
+- 把 widget 实例暴露出去，sidecar 数据到达时调 `widget.requestRender()` 触发重绘
+- 把 sidecar 返回的行追加到状态栏
 
-### 1.3 为什么这个锚点稳定
+**锚点怎么找**：`mcode-find-anchors.mjs` 用 acorn 解析整个 bundle 的 AST，
+按"WIDGET 特征"（`extends <Base>` + `super(t)` + `this.runtime` + `this.requestRender`
++ `this.shellState` + `setInterval`）定位 widget 类，再取其 `superClass` 作为基类，
+输出 `WIDGET_BODY_END` / `CTOR_END` 字节偏移。不依赖任何混淆短名，跨版本更稳。
 
-- `render(width)` 接受一个数字参数、返回 string 数组 — **这是 React 组件 render 的固定契约**
-- `["", r]`（空行 + content）— mcode 在 status bar 上面留空一行作为视觉间距，这个 layout 决策不会变
-- 整段都是 `let t=ma(e); if(t===0)return[]; ... return ...trim()?["",r]:[]` 的**结构性代码**，混淆器无法优化
+**为什么安全**：`super.render(e)` 调用的是基类原实现，只是在其结果后追加行，不改变原有渲染逻辑。
 
-**不稳定的部分**（会变的）：
-- `Xc` 这个类名（混淆器可能给成 `Yx`/`Z1` 等）
-- `ma` / `X6` / `J6` / `t3` / `xe` 这些内部函数名
+### 2.2 patch 2 — `cli.js`：静态 import sidecar
 
-所以 patch 锚点是**一长串 literal string**（包含整段 `render` body），而不是只匹配类名。
-
-## 2. 锚点 2 — `jf` (status widget class)
-
-### 2.1 原始代码
+在 `cli.js` 的 shebang 之后插入一行：
 
 ```js
-var jf=class extends Xc{
-  constructor(t,i,s){
-    super(t);
-    this.runtime=i;                          // ← mcode 运行时接口
-    this.requestRender=s;                    // ← 触发 mcode 重绘的回调
-    this.statusLineItems=t.statusLineItems;
-    this.shellState=t;
-    this.refresh();
-    this.refreshTimer=setInterval(()=>void this.refresh(),o3);
-    this.refreshTimer.unref?.()
-  }
-  shellState; statusLineItems; workspaceGit;
-  refreshTimer; refreshSequence=0; disposed=!1;
-  setState(t){...}
-  ...
+import "/home/weekbin/orca/projects/mcode/mcode-quota/sidecar/mcode-quota-fetcher-9f8a7b.mjs"; /* mcode-quota-sidecar */
+```
+
+**这是与旧方案最关键的差异**：旧方案用 `NODE_OPTIONS=--import=…`，该变量被 mcode 派生的
+所有子进程继承，导致每个子进程都加载 sidecar 并各自 fork `mmx` —— 进程风暴的根因。
+改成 cli.js 静态 import 后，只有真正跑 TUI 入口的进程才加载 sidecar。
+
+## 3. Sidecar
+
+`sidecar/mcode-quota-fetcher-9f8a7b.mjs` 由 patcher 生成（模板内联在 patcher 里），
+与 mcode 共享同一个 V8 isolate，通过 `globalThis` 通信：
+
+```js
+globalThis.__mcodeQuotaRender(width) -> string[]   // 渲染行（含 ANSI 颜色）
+globalThis.__mcodeQuotaStart()                     // 手动启动（一般不需要）
+globalThis.__mcodeRuntime / __mcodeShellState      // 由 patch 1 注入
+globalThis.__mcodeQuotaWidget                      // 由 patch 1 注入
+```
+
+### 3.1 懒启动（关键）
+
+sidecar **不自动启动**。`__mcodeQuotaRender` 第一次被调用时（即状态栏第一次真实渲染）
+才启动两个轮询器。子进程即使 import 了 sidecar，只要不渲染 TUI 就永远不 fork 任何进程。
+
+### 3.2 数据流
+
+```
+启动 mcodex
+  ↓
+patcher（幂等）→ fork 就绪
+  ↓
+exec <node> <fork>/code/cli.js
+  ↓
+cli.js 静态 import sidecar（仅注册函数，不启动）
+  ↓
+TUI 第一次渲染状态栏 → jf.render(width)
+  ↓
+render 注入 runtime/shellState/widget 到 globalThis
+  ↓
+render 调 __mcodeQuotaRender(width) → sidecar 懒启动轮询器
+  ↓
+[quota] 每 60s：spawn mmx quota show → 解析 → requestRefresh()
+[session] 每 10s：runtime.getSessionUsageSummary → 失败/全0 → sqlite 兜底
+  ↓
+requestRefresh() → widget.requestRender()（500ms 去抖）→ TUI 重绘
+  ↓
+__mcodeQuotaRender(width) → 按宽度排版 → Ink 写 stdout
+```
+
+### 3.3 排版
+
+- `dw(s)`：去 ANSI 后按 CJK=2 列计算显示宽度
+- 宽 ≥110：单行横排（省略重置时间）
+- 80–109：两行；周行尝试与会话行合并，放不下则拆成第三行
+- <80：三行
+- 每个 `fit()` 从 20 字符进度条开始向下收缩到 8，直到整行不超宽
+
+### 3.4 会话 token 兜底
+
+```js
+if (!summary || sumTotal(summary) === 0) {
+  const fb = await fetchSessionFromSqlite(sessionId);
+  if (fb && (!summary || sumTotal(fb) > 0)) summary = fb;
 }
 ```
 
-### 2.2 Patch 后的代码
+- runtime API 签名：`getSessionUsageSummary(sessionId)`，返回
+  `{inputTokens, outputTokens, reasoningTokens, cacheReadTokens, ...}`
+- sqlite 兜底：`~/.minimax/v2/sqlite/runtime-state.sqlite` 表 `local_runtime_token_usage`，
+  按 `session_id` 聚合
+- 总量 = `input_tokens + output_tokens + cache_read_tokens`
 
-```js
-var jf=class extends Xc{
-  constructor(t,i,s){
-    super(t);
-    this.runtime=i;
-    this.requestRender=s;
-    this.statusLineItems=t.statusLineItems;
-    this.shellState=t;
-    this.refresh();
-    this.refreshTimer=setInterval(()=>void this.refresh(),o3);
-    this.refreshTimer.unref?.();
+## 4. 进程风暴防护
 
-    // ↓↓↓ 注入: 启动 sidecar fetcher ↓↓↓
-    if(typeof globalThis.__mcodeQuotaStart==="function")
-      globalThis.__mcodeQuotaStart(()=>{
-        if(this.requestRender)setTimeout(()=>this.requestRender(),0)
-      });
-  }
-  ...
-}
-```
+| 防护 | 说明 |
+|---|---|
+| 不用 NODE_OPTIONS | sidecar 只在 TUI 进程加载 |
+| 懒启动 | 不渲染就永不 fork |
+| `isMmxOnPath()` | PATH 上没 `mmx` 直接失败返回，不 spawn |
+| `detached:true` + `process.kill(-pid)` | 超时按进程组 SIGKILL，避免孤儿 |
+| 失败上限 | 连续失败 5 次停用；5 分钟无成功自动恢复 |
+| stderr 上限 | 最多缓存 64KB |
+| 定时器 `unref()` | 不阻止 mcode 退出 |
 
-**只加了 1 行（实际是 4 行展开 if 块）**，原有逻辑完整保留。`this.requestRender` 是 mcode 提供的回调，触发后 mcode 会重新调 `Xc.render` 拉新数据。
+## 5. 升级兼容性
 
-### 2.3 为什么这个锚点稳定
+mcode 升级后：
 
-- `extends Xc` — 状态栏 widget 必须继承 base class（继承是 React 组件的固定模式）
-- `super(t)` — 必须调父构造
-- 构造体里**7 个赋值**（`runtime`/`requestRender`/`statusLineItems`/`shellState`/`refresh`/`refreshTimer`/`unref`）— 这是 mcode TUI 状态管理的固定 init 序列
-- `setInterval(... o3)` — TUI 定时 refresh 是必要的（fetch git metadata）
+1. `mcodex` 读到新版本号
+2. `.fork-marker` 版本不匹配 → 删除旧 fork
+3. 重新从 npm 下载新版本 tarball → 重建 fork → 重新找锚点打 patch
 
-整个构造体加 `extends Xc` 加 `var jf=class` — **200+ 字符的 literal string**，跨小版本几乎不可能完全重写。
+锚点用 AST 结构特征匹配，只要 mcode 的 TUI 状态栏还是
+"继承基类的 widget + `render(width)` 返回 string[]" 这套 Ink 契约，就无需人工干预。
 
-## 3. Sidecar 通信机制
-
-### 3.1 Sidecar 是什么
-
-`mcode-quota-fetcher-9f8a7b.mjs` 是 ESM 模块，**和 mcode 共享同一个 Node.js 进程**。它通过 `NODE_OPTIONS="--import=...mjs"` 在 mcode 启动时 preloaded。
-
-这意味着：
-- sidecar 写的 `globalThis.X` 在 mcode bundle 里能直接读（同一个 V8 isolate）
-- 不需要 IPC / 进程间通信
-- 不需要 HTTP / 文件 IPC
-- 不需要修改 mcode 的 import 路径
-
-### 3.2 通信协议
-
-**sidecar 暴露 2 个 globalThis 函数**：
-
-```js
-// 1. 启动 fetcher (status widget 构造时调)
-globalThis.__mcodeQuotaStart = (onUpdate) => {
-  // 立刻 fetch 一次
-  // 然后每 60s fetch 一次
-  // fetch 完后调 onUpdate() 触发 mcode 重绘
-};
-
-// 2. 渲染 quota 行 (Xc.render 时调, 接 width 决定 layout)
-globalThis.__mcodeQuotaRender = (width) => {
-  if (width >= 88) return [horizontalLine];  // 横排
-  return [verticalLine1, verticalLine2];     // 竖排
-};
-```
-
-**mcode 端只需要 patch 两行调用**，不引入新接口。
-
-### 3.3 数据流（时序图）
-
-```
-启动 mcode
-  ↓
-Node --import 加载 sidecar
-  ↓
-sidecar 挂 globalThis.__mcodeQuotaStart / __mcodeQuotaRender
-  ↓
-mcode 启动 launcher
-  ↓
-jf.constructor 调 __mcodeQuotaStart(requestRender)
-  ↓
-sidecar 立即 fork mmx quota + 启动 60s 定时器
-  ↓
-[T=0s] mmx 返回数据 → sidecar 调 requestRender()
-  ↓
-mcode 重绘 → Xc.render(width)
-  ↓
-Xc.render 调 __mcodeQuotaRender(width) → 拿到 string[]
-  ↓
-Ink 写 stdout → 用户看到 quota 行
-  ↓
-[T=60s] 定时器触发 → 重复 fetch + 重绘
-```
-
-## 4. 锚点匹配 — 怎么找、怎么验证
-
-### 4.1 当前锚点（mcode 0.3.10 / @minimax-ai/code 0.2.7）
-
-**RENDER_ANCHOR** (base class):
-
-```js
-Xc=class{constructor(e){this.state=e}setState(e){this.state=e}invalidate(){}render(e){let t=ma(e);if(t===0)return[];let i=X6(this.state);if(i.length===0)return[];let s=i.map(o=>J6(o,this.state)).filter(o=>o!==void 0);if(s.length===0)return[];let r=t3(s,t);return xe(r).trim()?["",r]:[]}}
-```
-
-**WIDGET_ANCHOR** (status widget):
-
-```js
-var jf=class extends Xc{constructor(t,i,s){super(t);this.runtime=i;this.requestRender=s;this.statusLineItems=t.statusLineItems,this.shellState=t,this.refresh(),this.refreshTimer=setInterval(()=>void this.refresh(),o3),this.refreshTimer.unref?.()}
-```
-
-### 4.2 升级后怎么找新锚点
-
-如果 patcher 报 `anchor not found`，说明 mcode 改了 launcher 内部结构。重新找：
-
-**找 base class**：
-
-```python
-import re
-with open('<launcher路径>', 'rb') as f: d = f.read().decode('utf-8', errors='replace')
-
-# 模式: <Name>=class{ ... render(<param>) { ... return ["",r] ... } }
-# 关键是: 有 render 方法 + 返回值包含 ["",r]
-pattern = r'(\w+)=class\{[^}]{0,300}render\(\w+\)\{[^}]{0,500}\[""",]r\]'
-for m in re.finditer(pattern, d):
-    name = m.group(1)
-    print(f"BASE CLASS: {name}")
-    print(m.group(0)[:500])
-    print('---')
-```
-
-**找 status widget**：
-
-```python
-# 模式: var <Name>=class extends <Base> { ... super(...); ... setInterval
-pattern = r'var (\w+)=class extends (\w+)\{[^}]{0,500}super\([^)]+\)[^}]{0,500}setInterval'
-for m in re.finditer(pattern, d):
-    name, base = m.group(1), m.group(2)
-    if 'requestRender' in m.group(0) and 'statusLineItems' in m.group(0):
-        print(f"STATUS WIDGET: {name} extends {base}")
-        print(m.group(0)[:500])
-        print('---')
-```
-
-### 4.3 为什么不用 AST 解析？
-
-可以，但 mcode chunks 是 esbuild 打包的产物（**不是源码**），格式是 minified single-line JS。AST 工具（acorn/babel）能解析但输出有噪声、匹配也复杂。
-
-**literal string 匹配反而更稳**：
-- 锚点必须完整匹配（任何子串都拒绝）→ 不接受近似匹配
-- 锚点变化 → patcher 直接退出码 2 → 强制人工 review
-- 比 AST "fuzzy match" 安全（AST fuzzy 可能在重构后误命中）
-
-### 4.4 兼容性历史
-
-| mcode 版本 | 锚点 | 状态 |
-|---|---|---|
-| 0.2.x 早期 | `bc=class{...render(e){...["",r]}}` | ❌ 已知不匹配（变量名 `bc` 不同） |
-| 0.3.10 | `Xc=class{...}` + `var jf=class extends Xc{...}` | ✅ 当前 patcher 用这组 |
-
-## 5. 更新流程
-
-### 5.1 简单升级（锚点没变）
-
-```bash
-mcode update
-mcode-patch-quota.sh   # 自动检测新 release，幂等
-mcode-quota-doctor
-mcode-with-quota       # 实测
-```
-
-### 5.2 锚点变了（需要 rebase）
-
-```bash
-# 1. 找新锚点 (用 §4.2 的 python 脚本)
-
-# 2. 编辑 mcode-patch-quota.sh:
-#    - RENDER_ANCHOR 替换成新 base class 字面量
-#    - WIDGET_ANCHOR 替换成新 widget class 字面量
-#    - RENDER_PATCH 里 'Xc=class' 改成 '新base=class'
-#    - WIDGET_PATCH 里 'var jf=class extends Xc' 改成 'var 新widget=class extends 新base'
-
-# 3. 验证
-mcode-patch-quota.sh
-mcode-quota-doctor
-mcode-with-quota
-
-# 4. commit
-git add mcode-quota/
-git commit -m "feat: rebase anchors for mcode <新版本>"
-```
-
-### 5.3 大重构（launcher 整体重写）
-
-如果整个 launcher 文件结构变化，patcher 找锚点的正则都要重写。
-
-这种情况很少（每 1-2 年一次），建议**完全重启 patcher** — 备份新 launcher，定位新位置，更新 4 个变量。
+如果 mcode 大重构导致锚点找不到，patcher 会明确报错并**回退到未打 patch 的官方 mcode**
+（`mcodex` 的 fallback 分支），不会把你卡住。
 
 ## 6. 已知限制
 
-- **mcode update 会重装 release** — 必须每次重跑 patcher（已用 `--import` 注入避免改 mcode 主代码）
-- **混淆器每次跑可能产生不同短名** — patcher 必须用 literal string 锚定整段结构
-- **sidecar 必须放在 mcode chunks 目录**（npm 包内）— 这是 mcode 加载路径决定的
-- **color 24-bit 需要 terminal 支持** — 老 terminal（TERM=xterm）会显示成方块或忽略
-- **mmx CLI 是外部依赖** — 必须 PATH 上能找到，且 `mmx auth status` 已登录
+- fork 每个版本占约 62MB（真实拷贝，换来无 realpath 陷阱）
+- sidecar 路径写死在 fork 的 `cli.js` 里；若移动项目目录，需重跑 patcher（`mcodex` 会自动检测并重写）
+- 24-bit 颜色需要终端支持
+- `mmx` 是外部依赖，未登录时只显示会话 tokens

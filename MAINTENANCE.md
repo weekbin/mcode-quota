@@ -1,6 +1,4 @@
-# mcode quota patch — 维护指南
-
-这份文档说明当 mcode 升级后，patch 应该怎么**重新应用**、**验证**、**重派生**，以及**彻底还原**的完整流程。
+# mcodex — 维护指南
 
 ## 1. TL;DR
 
@@ -8,79 +6,65 @@
 # 升级 mcode
 mcode update
 
-# 重跑 patcher
-/home/weekbin/orca/projects/mcode/mcode-quota/mcode-patch-quota.sh
+# 直接启动（自动重建 fork）
+mcodex
 
 # 自检
 /home/weekbin/orca/projects/mcode/mcode-quota/mcode-quota-doctor
 
-# 启动验证
-mcode-with-quota
+# 启动实测
+mcodex
 ```
 
-如果上面任何一步报错，看 §4（patch 失败诊断）。
+绝大多数情况下**不需要手动跑 patcher** —— `mcodex` 每次启动都会做幂等检查。
 
 ---
 
-## 2. 架构回顾（出问题先看这里）
+## 2. 架构速览
 
 ```
-┌─────────────────────────── mcode process ─────────────────────────────┐
-│                                                                        │
-│  Node.js (--import=sidecar)                                            │
-│    │                                                                   │
-│    ├── launcher-CVR77P3I.js   ←── 打了 patch                          │
-│    │     │                                                             │
-│    │     ├── class Xc { render(width) {...} }   ←── 改过:调渲染器     │
-│    │     │     return [..., r, ...globalThis.__mcodeQuotaRender(w)]  │
-│    │     │                                                             │
-│    │     └── class jf extends Xc {...}          ←── 改过:启动 hook    │
-│    │           constructor { globalThis.__mcodeQuotaStart(cb) }        │
-│    │                                                                   │
-│    └── mcode-quota-fetcher-9f8a7b.mjs        ←── sidecar              │
-│          │                                                             │
-│          ├── globalThis.__mcodeQuotaRender(width) → string[]          │
-│          │     决定横排/竖排 + 注入 ANSI 24-bit 颜色                  │
-│          │                                                             │
-│          └── globalThis.__mcodeQuotaStart(onUpdate)                    │
-│                周期性 fork `mmx quota show --output json`              │
-│                                                                        │
-└────────────────────────────────────────────────────────────────────────┘
+mcode 官方安装（只读）        私有 fork（可随时删）
+~/.minimax-code/releases/<v>/  ~/.local/share/mcode-quota/mcode-clone/<v>/code/
+   lib/.../chunks/launcher.js     cli.js            ← 静态 import sidecar
+        │                         chunks/launcher.js ← render() 覆盖
+        │                              │
+        └──── 从不写入 ────────────────┘
+                                       │
+                    sidecar（项目目录）← 懒启动：第一次渲染才 fork mmx
 ```
 
-**两个 patch 锚点**（mcode-patch-quota.sh）：
-
-1. `Xc.render(e)` — 状态栏渲染基类
-2. `jf.constructor(t, i, s)` — 状态栏 widget 类
+- patcher：`mcode-patch-quota.mjs`（Node，幂等）
+- 锚点发现：`mcode-find-anchors.mjs`（acorn AST）
+- 入口：`~/.minimax/bin/mcodex` → 项目目录 `mcodex`
+- 自检：`mcode-quota-doctor`
 
 ---
 
 ## 3. 常规升级流程
 
-### 3.1 升级 mcode
+### 3.1 升级
 
 ```bash
 mcode update
 ```
 
-`mcode update` 会：
-- 通过 npm 拉新 release
-- 把 `~/.minimax-code/current` 指向新版本
-- 把新 launcher 写到 `~/.minimax-code/releases/<新版本>/lib/node_modules/@minimax-ai/code/chunks/launcher-*.js`
-- **旧 release 目录保留**（包括之前的 patch 痕迹）
-
-### 3.2 重跑 patcher
+### 3.2 启动
 
 ```bash
-/home/weekbin/orca/projects/mcode/mcode-quota/mcode-patch-quota.sh
+mcodex
 ```
 
-patcher 行为：
-- 读 `~/.minimax-code/current` 拿新版本号
-- 找新 release 的 launcher
-- 如果新 launcher 是**未被 patch 的**（对比 backup）→ 注入两个锚点 + 写 sidecar
-- 如果**已被 patch**（之前跑过）→ 静默跳过（幂等）
-- 如果**锚点找不到** → 退出码 2 + 明确报错
+`mcodex` 内部流程：
+
+1. 读 `~/.minimax-code/current`
+2. 跑 `mcode-patch-quota.mjs --src=... --fork-base=... --sidecar=... --current=<版本>`
+   - `.fork-marker` 版本不匹配 → 删除旧 fork
+   - 从 `tarballs/minimax-ai-code-<版本>.tgz` 解压；没有就 `npm pack` 下载
+   - 真实拷贝到 `<fork>/code`
+   - 打两处 patch + 重写 sidecar
+3. `exec <mcode 官方 node> <fork>/code/cli.js "$@"`
+
+patcher 失败 → **自动回退到未打 patch 的官方 mcode**，不会卡住你。
 
 ### 3.3 自检
 
@@ -88,278 +72,176 @@ patcher 行为：
 /home/weekbin/orca/projects/mcode/mcode-quota/mcode-quota-doctor
 ```
 
-期望输出：
-```
-[ok]  mcode current pointer: 0.3.x
-[ok]  Launcher: launcher-XXX.js
-[ok]  Backup present
-[ok]  Render hook patched
-[ok]  Widget hook patched
-[ok]  Sidecar present
-[ok]  mmx on PATH
-[ok]  Sidecar live render: ...
-[ok]  Wrapper present
-[ok]  mmx appears logged in
-
-Result: 10 ok, 0 warnings, 0 failures
-```
-
-### 3.4 启动验证
-
-```bash
-mcode-with-quota
-```
-
-进入 mcode TUI，看状态栏下面**是否多了一行 quota**：
+期望 `14 ok, 0 warnings, 0 failures`。关键项：
 
 ```
-~/path/... │ Permissions │ ✦ model
-5-hour [████████████░░░░░░░░] 61% left  ·  Weekly [██████████████████░░] 90% left
+[ok] mcode launcher pristine (no quota hooks)
+[ok] mcode launcher byte-identical to pristine npm tarball
+[ok] fork launcher render hook present
+[ok] fork cli.js imports sidecar statically
+[ok] mcodex does not use NODE_OPTIONS
+[ok] no mmx process storm (concurrent: 0)
 ```
-
-如果显示正常 → 升级完成。
 
 ---
 
-## 4. Patch 失败诊断
+## 4. 故障诊断
 
-patcher 退出码 2 通常是 `RENDER_ANCHOR` 或 `WIDGET_ANCHOR` 找不到。可能原因：
-
-| 现象 | 原因 | 下一步 |
+| 现象 | 原因 | 处理 |
 |---|---|---|
-| `Base class anchor not found` | mcode 重命名了 `Xc` 类（之前观察到 U4C3IZNL → CVR77P3I 切换时也变了） | §5 重派生锚点 |
-| `Status widget anchor not found` | mcode 重命名了 `jf` 类或改了构造签名 | §5 重派生锚点 |
-| patcher 静默跳过（"already patched"）但实际未生效 | launcher hash 变了但文件名模式没变 | 删 backup 强制重 patch |
+| `mcodex` 启动后是**原版界面**（无 quota 行） | patcher 失败已回退 | `MCODE_QUOTA_DEBUG=1 mcodex` 看 stderr |
+| quota 行完全不显示 | sidecar 未加载 / fork 未建 | 跑 doctor；确认 `fork cli.js imports sidecar` 为 ok |
+| 只有会话 tokens，无 5小时/周 | `mmx` 不在 PATH 或未登录 | `which mmx`；`mmx auth status` |
+| 会话 tokens 恒为 0 | runtime 与 sqlite 都无该会话数据 | 确认会话有完成的 turn；`SELECT * FROM local_runtime_token_usage WHERE session_id=...` |
+| doctor 报 `mcode launcher is PATCHED` | 历史遗留污染 | 用 npm tarball 覆盖该 launcher（见 §6） |
+| doctor 报 fork 相关 FAIL | fork 半成品 | 删掉 fork 目录，重跑 `mcodex` |
+| 进度条颜色不显示 | 终端不支持 24-bit | 设置 `COLORTERM=truecolor` 或换终端 |
+| 升级后锚点找不到 | mcode 大重构 | §5 重派生 |
 
-### 4.1 强制重新 patch
+### 4.1 打开诊断日志
 
 ```bash
-# 删掉 backup 让 patcher 重新当作未 patch 的 launcher
-rm ~/.minimax-code/releases/<v>/lib/node_modules/@minimax-ai/code/chunks/launcher-*.unpatched.bak
-/home/weekbin/orca/projects/mcode/mcode-quota/mcode-patch-quota.sh
+MCODE_QUOTA_DEBUG=1 mcodex
 ```
 
-### 4.2 验证 launcher 是否真的被 patch
+### 4.2 强制重建 fork
 
 ```bash
-LAUNCHER=~/.minimax-code/releases/<v>/lib/node_modules/@minimax-ai/code/chunks/launcher-*.js
-grep -c "__mcodeQuotaRender\|__mcodeQuotaStart" "$LAUNCHER"
-# 期望 >= 2（每个名字至少一处定义 + 一处调用）
+node -e 'require("fs").rmSync(process.env.HOME+"/.local/share/mcode-quota/mcode-clone/0.3.10",{recursive:true,force:true})'
+mcodex
 ```
 
-### 4.3 验证 launcher 语法
+（把 `0.3.10` 换成实际版本；版本号见 `cat ~/.minimax-code/current`。）
+
+### 4.3 离线模式
 
 ```bash
-LAUNCHER=~/.minimax-code/releases/<v>/lib/node_modules/@minimax-ai/code/chunks/launcher-*.js
-node --check "$LAUNCHER" && echo "syntax OK"
-# 期望 exit 0 + "syntax OK"
+MCODE_QUOTA_OFFLINE=1 mcodex    # 只用已缓存 tarball 或已安装源码，不联网
 ```
 
 ---
 
-## 5. 重派生锚点（mcode 改了 launcher 内部时）
+## 5. 重派生锚点（mcode 大重构时）
 
-如果 patcher 报"anchor not found"，需要**重新找到两个锚点**。
-
-### 5.1 找到 base class 锚点
-
-在 launcher 里找 status 渲染基类（**`render(width)` 方法返回 `["", content]` 数组**的类）：
+patcher 报 `anchor finder failed` / `anchor parse failed` 时：
 
 ```bash
-LAUNCHER=~/.minimax-code/releases/<v>/lib/node_modules/@minimax-ai/code/chunks/launcher-*.js
-# 找 class 定义 + render 方法
-python3 -c "
-with open('$LAUNCHER', 'rb') as f: d = f.read().decode('utf-8', errors='replace')
-import re
-# Match: Xc=class{...render(width){...}}
-# 在 0.2.7 0.3.10 是 Xc；未来可能改名字
-for m in re.finditer(r'(\w+)=class\{[^}]*?render\(\w+\)\{[^}]{0,400}\}\}', d):
-    print(m.group(0)[:400])
-    print('---')
-"
+node /home/weekbin/orca/projects/mcode/mcode-quota/mcode-find-anchors.mjs \
+     ~/.local/share/mcode-quota/mcode-clone/<版本>/code/chunks/launcher-*.js
 ```
 
-**重点找**：
+输出示例：
 
-```js
-XXXX=class{constructor(e){this.state=e}setState(e){this.state=e}invalidate(){}render(e){let t=XXXXX(e);...return XXXXX(r).trim()?["",r]:[]}}
+```
+BASE='Xc'
+WIDGET='jf'
+RENDER_METHOD_END=824661
+WIDGET_BODY_END=824662
+CTOR_END=823576
 ```
 
-`XXXX` 是被混淆后的短名（之前观察过 `bc` → `Xc`）。模式特征：
-- `render(e)` 接受一个 width 参数
-- 末尾返回 `["",r]`（空行 + content）
+`mcode-find-anchors.mjs` 的匹配特征（`WIDGET`）：
 
-### 5.2 找到 widget class 锚点
+- `class extends <Base>`
+- 构造体含 `super(`、`this.runtime`、`this.requestRender`、`this.shellState`、`setInterval`
+- 类体最后一个成员是 `render`
 
-找继承自 base class 的**状态栏 widget** 类（构造时调 `super(t)` + 设 `this.runtime` + `this.requestRender` + `setInterval`）：
+如果 mcode 改了这些特征，需要更新 `mcode-find-anchors.mjs` 里的特征列表。
+**patcher 本体不需要改** —— 它只消费 `WIDGET_BODY_END` / `CTOR_END` 两个偏移。
+
+验证：
 
 ```bash
-# 找 extends Xc 的类
-python3 -c "
-with open('$LAUNCHER', 'rb') as f: d = f.read().decode('utf-8', errors='replace')
-import re
-# Match: var YYYY=class extends XXXX{...}
-for m in re.finditer(r'var (\w+)=class extends \w+\{[^}]{0,800}\}', d):
-    if 'super(' in m.group(0) and 'setInterval' in m.group(0) and 'requestRender' in m.group(0):
-        print(m.group(0)[:500])
-        print('---')
-"
-```
-
-### 5.3 更新 patcher
-
-把新找到的 `XXXX` 替换旧 `Xc`，新 `YYYY` 替换旧 `jf`，更新 `mcode-patch-quota.sh` 里的：
-
-- `RENDER_ANCHOR`
-- `WIDGET_ANCHOR`
-- `RENDER_PATCH`（把 `Xc=class` 替换成 `XXXX=class`，`Xc.render` 不用动）
-- `WIDGET_PATCH`（把 `var jf=class extends Xc` 替换成 `var YYYY=class extends XXXX`）
-
-### 5.4 复测
-
-```bash
-/home/weekbin/orca/projects/mcode/mcode-quota/mcode-patch-quota.sh
-/home/weekbin/orca/projects/mcode/mcode-quota/mcode-quota-doctor
-mcode-with-quota
+node mcode-patch-quota.mjs --fork-base=... --sidecar=... --current=<版本> --offline
+node --check ~/.local/share/mcode-quota/mcode-clone/<版本>/code/chunks/launcher-*.js
 ```
 
 ---
 
-## 6. 彻底还原
+## 6. 把 mcode 还原到纯净状态
 
-如果想完全回到原始 mcode（不带 quota 行）：
-
-### 6.1 当前版本
-
-```bash
-LAUNCHER=~/.minimax-code/releases/<v>/lib/node_modules/@minimax-ai/code/chunks/launcher-*.js
-cp "$LAUNCHER.unpatched.bak" "$LAUNCHER"
-rm "$LAUNCHER.unpatched.bak" "$LAUNCHER.unpatched.bak.stamp"
-rm ~/.minimax-code/releases/<v>/lib/node_modules/@minimax-ai/code/chunks/mcode-quota-fetcher-*.mjs
-```
-
-### 6.2 全部 release 都还原
+正常情况下**不需要**做这件事（我们从没写过 mcode 本体）。
+如果历史版本留下了污染，用官方 tarball 覆盖：
 
 ```bash
-# 谨慎：会还原所有 mcode 版本
-for release in ~/.minimax-code/releases/*/; do
-  for bak in "$release"lib/node_modules/@minimax-ai/code/chunks/launcher-*.unpatched.bak; do
-    [[ -f "$bak" ]] || continue
-    target="${bak%.unpatched.bak}"
-    echo "Restoring: $target"
-    cp -p "$bak" "$target"
-    rm "$bak"
-  done
-  rm -f "$release"lib/node_modules/@minimax-ai/code/chunks/mcode-quota-fetcher-*.mjs
-done
+V=0.3.10
+TB=~/.local/share/mcode-quota/mcode-clone/tarballs/minimax-ai-code-$V.tgz
+DST=~/.minimax-code/releases/$V/lib/node_modules/@minimax-ai/code
+mkdir -p /tmp/restore-$V && tar -xzf "$TB" -C /tmp/restore-$V --strip-components=1
+cp -f /tmp/restore-$V/chunks/launcher-*.js "$DST/chunks/"
+# 删除遗留文件
+node -e 'const fs=require("fs");const d="'"$DST"'/chunks";for(const f of fs.readdirSync(d))if(/quota|unpatched\.bak|stormquake/.test(f)){fs.unlinkSync(d+"/"+f);console.log("removed",f)}'
 ```
 
-### 6.3 卸载工具集
-
-```bash
-rm -rf /home/weekbin/orca/projects/mcode/mcode-quota
-rm -f /home/weekbin/.minimax/bin/mcode-with-quota
-```
-
-下次想用就从 git 历史（如果项目版本化了）恢复。
+然后 `mcode-quota-doctor` 应显示 `byte-identical to pristine npm tarball`。
 
 ---
 
-## 7. 自定义扩展
+## 7. 自定义
 
-### 7.1 改颜色阈值
+全部改动都在 `mcode-patch-quota.mjs` 的 `SIDECAR_BODY` 模板里，改完重跑 `mcodex` 即生效。
 
-`mcode-patch-quota.sh` 的 sidecar 模板里：
+### 7.1 颜色阈值
 
 ```js
 const colorFor = (rem) =>
-  rem == null ? C_MUTED : rem <= 10 ? C_ERROR : rem <= 30 ? C_WARNING : C_SUCCESS;
+  rem == null ? C_MUTED : rem <= 20 ? C_ERROR : rem <= 50 ? C_WARNING : C_SUCCESS;
 ```
 
-改 `10` / `30` 切换点（比如想 15% / 50%）即可。
-
-### 7.2 改颜色 RGB
+### 7.2 颜色 RGB
 
 ```js
-const C_SUCCESS = "38;2;60;160;90";    // 改 RGB 三元组
-const C_WARNING = "38;2;200;150;40";
-const C_ERROR   = "38;2;200;80;80";
+const C_SUCCESS = "38;2;60;160;90";    // 深绿
+const C_WARNING = "38;2;200;150;40";   // 暗橙
+const C_ERROR   = "38;2;200;80;80";    // 暗红
 ```
 
-### 7.3 改进度条宽度
+### 7.3 进度条宽度 / 布局阈值
 
 ```js
-const MAX_BAR_WIDTH = 20;   // 改这里
-const MIN_BAR_WIDTH = 12;
+const MAX_BAR_WIDTH = 20;
+const MIN_BAR_WIDTH = 8;
+const HORIZ_MIN_WIDTH = 110;
+const NARROW_MIN_WIDTH = 80;
 ```
 
-### 7.4 改缓存 TTL
+### 7.4 刷新节奏
 
 ```js
-const CACHE_TTL_MS = 60_000;   // 默认 60s，改这里
+const CACHE_TTL_MS = 60_000;      // quota 轮询间隔
+const SESSION_TTL_MS = 10_000;    // 会话 token 轮询间隔
+const FETCH_TIMEOUT_MS = 20_000;  // mmx 单次超时
 ```
 
-### 7.5 加新字段（比如 token 总量）
-
-1. 改 sidecar 模板的 `raw` 对象加新字段
-2. 改 `fetchOnce` 解析新字段（从 `mmx quota` JSON）
-3. 改 `renderOne` 在横排 / 竖排时输出新内容
-
-### 7.6 改横排/竖排切换阈值
+### 7.5 文案
 
 ```js
-const HORIZ_MIN_WIDTH = 88;   // 改这里（< 这个宽度 → 竖排）
+const L_LABEL_5H = "5小时使用量";
+const L_LABEL_WEEK = "周使用量";
+const L_LABEL_SESSION = "会话 tokens";
 ```
 
-### 7.7 改完怎么生效
+---
 
-直接跑 patcher：
+## 8. 卸载
 
 ```bash
-/home/weekbin/orca/projects/mcode/mcode-quota/mcode-patch-quota.sh
-# 它会检测"已 patch"并跳过 launcher patch，但 sidecar 模板会被覆盖重写
-# （注：当前 patcher 对 sidecar 始终重写，覆盖已有）
+# 1. 删 PATH 入口
+node -e 'require("fs").unlinkSync(process.env.HOME+"/.minimax/bin/mcodex")'
+
+# 2. 删 fork 与缓存（约 130MB）
+node -e 'require("fs").rmSync(process.env.HOME+"/.local/share/mcode-quota",{recursive:true,force:true})'
+
+# 3. 工具集本身在 git 仓库里，按需保留
 ```
 
-如果只想改 sidecar 不动 launcher：手动复制 patcher 里 sidecar 模板内容到 `~/.minimax-code/.../mcode-quota-fetcher-9f8a7b.mjs`。
+mcode 本体从未被修改，卸载后 `mcode` 照常工作。
 
 ---
 
-## 8. Troubleshooting 速查表
+## 9. 已知限制
 
-| 症状 | 原因 | 修复 |
-|---|---|---|
-| mcode 启动报 "Invalid or unexpected token" | launcher 语法被破坏（patch 失败残留） | 还原 backup，重跑 patcher |
-| quota 行完全不显示 | sidecar 没启动（NODE_OPTIONS 没设） | 用 `mcode-with-quota` 启动，不要直接 `mcode` |
-| quota 行显示为灰色"no data" | mmx 没登录 / mmx quota 拿不到数据 | 跑 `mmx auth status` 确认登录 |
-| 进度条颜色不显示 | terminal 不支持 24-bit color | 终端设置 `COLORTERM=truecolor` 或换终端 |
-| mcode 启动时 sidecar 报 fetch 错误 | mmx 没在 PATH 上 | `which mmx` 确认；或 symlink 到 `/usr/local/bin` |
-| 切换 release 后 quota 不显示 | 新 release 的 launcher 没 patch | 跑 `mcode-patch-quota.sh`（§3.2） |
-| 切换 release 后 patcher 报 anchor not found | mcode 内部 anchor 改名 | §5 重派生锚点 |
-| 升级 mcode 后 quota 行颜色变了 | mcode 内部 theme 改了 | 不用管 — 我们的 RGB 是写死的（§7.2） |
-| 进度条后面"resets in"被截断 | terminal 太窄 + mcode 内部 truncate | 拉宽 terminal（§7.6 改切换阈值） |
-
----
-
-## 9. 备份策略建议
-
-工具集本身放在 `~/orca/projects/mcode/mcode-quota/`（用户工作区）— 但**项目目录本身没版本化**。强烈建议把整个目录纳入 git：
-
-```bash
-cd /home/weekbin/orca/projects/mcode
-git init
-git add mcode-quota/
-git commit -m "init: mcode quota status-bar patch tools"
-```
-
-以后 patcher 脚本改了可以直接 `git diff` 看变化；mcode 升级后出问题也能 `git log` 找回归点。
-
----
-
-## 10. 已知限制
-
-- **sidecar 必须放在 mcode chunks 目录**（`~/.minimax-code/.../chunks/`）— 这是 mcode npm 包内的固定位置，mcode update 会清空
-- **进度条颜色只在支持 24-bit color 的终端显示**（绝大多数现代 terminal 都支持）
-- **`script` 伪 TTY 默认 80 列**，所以 CI / 自动化测试看到的总是竖排 layout
-- **mmx CLI 是 mmx 独立产品**，跨 mcode 版本稳定；但如果 mmx 改了 `quota show` 输出 schema，需要改 `fetchOnce` 里的字段名
-- **patcher 不验证 sidecar 运行**（只验证文件存在），需要 `mcode-quota-doctor` 做运行时检查
+- fork 每版本约 62MB 真实拷贝（换掉 realpath 陷阱）
+- sidecar 路径写死在 fork 的 `cli.js`；移动项目目录需重跑 patcher（`mcodex` 自动处理）
+- `mmx` 输出 schema 变化时需更新 `fetchQuotaOnce` 里的字段名
+- `script` 伪 TTY 默认 80 列，自动化测试通常看到两行布局

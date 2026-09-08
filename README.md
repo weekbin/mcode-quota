@@ -1,110 +1,150 @@
-# mcode status-bar quota patch
+# mcodex — mcode 状态栏配额 / token 用量
 
-在 mcode TUI 状态栏下面显示当前套餐的日 / 周使用量（带进度条 + 颜色）。
+在 mcode TUI 状态栏下面显示：
+
+- **5小时使用量** — 当前 5 小时窗口剩余百分比 + 进度条 + 重置倒计时
+- **周使用量** — 当前周窗口剩余百分比 + 进度条 + 重置倒计时
+- **会话 tokens** — 当前会话累计 token（输入 / 输出 / 缓存）
+
+数据来自 `mmx quota show` 和 mcode runtime / sqlite，全部带 24-bit 颜色分级。
+
+## 核心设计：环境隔离，绝不改 mcode
+
+早期版本直接 patch `~/.minimax-code` 里 mcode 本体的 launcher，结果一旦 patch 有 bug，
+**用 mcode 排查问题时排查不到根源**，还会不断拉起僵尸进程。现在改成：
+
+```
+mcode 本体（只读，字节级等于 npm 官方包）
+        ▲
+        │ 从不写入
+        │
+mcodex ─┴─> 私有 fork：~/.local/share/mcode-quota/mcode-clone/<版本>/code/
+             （从 npm 官方 tarball 解压出来的完整真实拷贝）
+             └── 只在这里打两个 patch
+```
+
+- **mcode 本体永不被修改**。fork 是从 npm registry 下载的**干净 tarball**解压而来，
+  不是从已安装目录复制（避免把污染带进 fork）。
+- fork 是**真实拷贝**（不是 symlink）—— 避免 Node realpath 解析把相对 import 指回源安装。
+- fork 坏了？直接删掉重新生成，mcode 毫发无损。
+- `mcode-quota-doctor` 会校验 mcode launcher 与 npm 官方包**字节一致**。
+
+## 入口
+
+```bash
+mcodex            # 任何目录都可以（~/.minimax/bin/mcodex 在 PATH 上）
+mcodex --help
+```
+
+`mcodex` 做的事：
+1. 读 `~/.minimax-code/current` 拿当前版本
+2. 跑 `mcode-patch-quota.mjs`（幂等，已就绪时 <1s）
+3. `exec <mcode 官方 node> <fork>/code/cli.js "$@"`
+
+patcher 失败时自动回退到**未打 patch 的官方 mcode**，不会卡住你。
 
 ## 效果
 
-**宽 TUI（≥88 cols）** — 单行横排：
+**宽终端（≥110 cols）** — 单行横排：
 
 ```
-~/projects/... │ Permissions │ ✦ no model
-5-hour [███████████████████████░░░░░░░░░░░░░░░] 61% left  ·  Weekly [██████████████████████████████████░░░░] 90% left
+~/projects/... │ Permissions │ ✦ model
+5小时使用量 [████████████░░░] 79% 剩余  ·  周使用量 [█████████████░░] 86% 剩余  ·  会话 tokens 202.6M (输入 3.85M · 输出 530K · 缓存 198.4M)
 ```
 
-**窄 TUI（<88 cols）** — 自动 fallback 为两行（带 reset time）：
+**中等终端（80–109 cols）** — 两行：
 
 ```
-~/projects/... │ Permissions │ ✦ no model
-5-hour [█████████████████████░░░░░░░░░░░]  61% left  · resets in 2h 21m
-Weekly [███████████████████████████░░░]  90% left  · resets in 5d 11h
+5小时使用量 [████████████████░░░░] 79% 剩余  · 重置 2h 44m
+周使用量 [█████████████████░░░] 86% 剩余  · 重置 5d 6h  ·  会话 tokens 202.6M (...)
 ```
 
-**颜色（按 remaining % 自动分级，色调调柔和了）**：
+**窄终端（<80 cols）** — 三行：
 
-| remaining | 颜色 | RGB | 用途 |
-|---|---|---|---|
-| > 30% | 深绿 (success) | `(60,160,90)` | 充足 |
-| 11-30% | 暗橙 (warning) | `(200,150,40)` | 偏低 |
-| ≤ 10% | 暗红 (error) | `(200,80,80)` | 即将耗尽 |
-| 无数据 | 灰 (muted) | `(140,140,140)` | 缺数据 |
+```
+5小时使用量 [████████████████░░░░] 79% 剩余  · 重置 2h 44m
+周使用量 [█████████████████░░░] 86% 剩余  · 重置 5d 6h
+会话 tokens 202.6M (输入 3.85M · 输出 530K · 缓存 198.4M)
+```
 
-进度条 fill 部分和百分比文字按上面规则上色；empty 部分始终灰色。
+布局会按终端宽度**自动收缩进度条**（clamp 到 8–20 字符），保证不溢出。
+CJK 字符按 2 列计算宽度。
 
-**进度条宽度**：clamp 到 **[12, 20] 字符**，无论终端多宽都不会拉成超长条。
+**颜色（按剩余百分比分级）**：
+
+| 剩余 | 颜色 | RGB |
+|---|---|---|
+| > 50% | 深绿 | `(60,160,90)` |
+| 21–50% | 暗橙 | `(200,150,40)` |
+| ≤ 20% | 暗红 | `(200,80,80)` |
+| 无数据 | 灰 | `(140,140,140)` |
 
 ## 文件
 
 ```
-/home/weekbin/orca/projects/mcode/mcode-quota/        # 工具集（single source of truth）
-├── README.md
-├── mcode-patch-quota.sh     # 升级 mcode 后重跑
-├── mcode-with-quota         # 一键启动 wrapper
-└── mcode-quota-doctor       # 自检（10 项）
+/home/weekbin/orca/projects/mcode/mcode-quota/   # 工具集（git 仓库，single source of truth）
+├── mcodex                       # 入口 wrapper
+├── mcode-patch-quota.mjs        # 构建 fork + 打 patch + 生成 sidecar
+├── mcode-find-anchors.mjs       # acorn AST 锚点发现器
+├── mcode-quota-doctor           # 自检（14 项）
+├── sidecar/                     # patcher 生成的 sidecar（不要手改）
+└── README / ARCHITECTURE / MAINTENANCE / CHANGELOG
 
-/home/weekbin/.minimax/bin/mcode-with-quota            # PATH 入口（328 字节，exec 项目目录 wrapper）
-~/.minimax-code/.../chunks/mcode-quota-fetcher-9f8a7b.mjs  # sidecar（patcher 写入，mcode update 后需重建）
-~/.minimax-code/.../chunks/launcher-CVR77P3I.js.unpatched.bak  # 备份
+~/.minimax/bin/mcodex                                            # PATH 入口（250 字节 stub）
+~/.local/share/mcode-quota/mcode-clone/tarballs/                 # 官方 tarball 缓存
+~/.local/share/mcode-quota/mcode-clone/.pristine-<版本>/         # 解压出的纯净源码
+~/.local/share/mcode-quota/mcode-clone/<版本>/code/              # 打了 patch 的 fork
 ```
 
 ## 安装 / 使用
 
 ```bash
-# 第一次：跑 patcher（在 launcher 注入 quota 钩子 + 写 sidecar）
-/home/weekbin/orca/projects/mcode/mcode-quota/mcode-patch-quota.sh
+# 首次：什么都不用手动做，直接跑（会自动下载 tarball 并建 fork）
+mcodex
 
-# 之后：启动 mcode（任何目录都行）
-mcode-with-quota
+# 自检
+/home/weekbin/orca/projects/mcode/mcode-quota/mcode-quota-doctor
 ```
-
-`mcode-with-quota` 在 `~/.minimax/bin/`（PATH 上），内部 `exec` 项目目录里的 wrapper。
 
 ## 升级 mcode
 
 ```bash
-mcode update
-/home/weekbin/orca/projects/mcode/mcode-quota/mcode-patch-quota.sh
+mcode update      # 官方升级
+mcodex            # 直接跑：检测到版本变化会自动重新下载 tarball、重建 fork
+mcode-quota-doctor
 ```
 
-如果 mcode 改 launcher 内部结构，patcher 退出码 2 + 报错信息提示重新派生锚点。
+不需要手动跑 patcher，`mcodex` 每次启动都会做幂等检查。
 
-## 自检
+## 数据源与刷新
 
-```bash
-/home/weekbin/orca/projects/mcode/mcode-quota/mcode-quota-doctor
-```
+| 数据 | 来源 | TTL | 超时 |
+|---|---|---|---|
+| 5小时 / 周使用量 | `mmx quota show --output json --quiet` | 60s | 20s |
+| 会话 tokens | runtime `getSessionUsageSummary` → sqlite `local_runtime_token_usage` 兜底 | 10s | — |
 
-期望 `10 ok, 0 warnings, 0 failures`。
+会话 token 总量 = `input_tokens + output_tokens + cache_read_tokens`。
 
-## 还原
+**兜底逻辑**：runtime API 有时在 turn 落库前返回全 0，或返回结构不符预期。
+此时会自动回落到 sqlite；只有两边都没有真实数字时才显示 0。
 
-```bash
-LAUNCHER=~/.minimax-code/releases/<v>/lib/node_modules/@minimax-ai/code/chunks/launcher-*.js
-cp "$LAUNCHER.unpatched.bak" "$LAUNCHER"
-rm "$LAUNCHER"/*.unpatched.bak 2>/dev/null
-rm ~/.minimax-code/releases/<v>/lib/node_modules/@minimax-ai/code/chunks/mcode-quota-fetcher-*.mjs
-```
+## 为什么不会再有僵尸进程风暴
 
-## 数据源
+旧版本用 `NODE_OPTIONS=--import=<sidecar>` 注入，**这个环境变量会被 mcode 派生的每一个子进程继承**，
+每个子进程都启动一个 `mmx` 轮询器 → 进程数指数级爆炸。
 
-- `mmx quota show --output json` — 通过 `child_process.spawn` fork
-- 缓存 TTL：60s
-- 单次 fetch 超时：5s（超时 SIGKILL）
-- sidecar fetch 完成后通过 `requestRender()` 触发 TUI 重绘
+现在：
 
-## 工作原理
-
-1. **Launcher patch**（mcode-patch-quota.sh）：替换 launcher bundle 里两个稳定锚点
-   - `Xc.render` (status 渲染基类) — 渲染结束时调 `globalThis.__mcodeQuotaRender(width)` 拿到 string[]，追加到 status bar
-   - `jf.constructor` (status widget 类) — 构造时调 `globalThis.__mcodeQuotaStart(cb)` 注册更新回调
-2. **Sidecar**：`--import=...mjs` 在 mcode 启动时加载
-   - 每 60s 跑 `mmx quota show --output json`
-   - 解析成 raw 数据存闭包
-   - 暴露 `__mcodeQuotaRender(width)`：根据 width 决定横排 / 竖排 layout，注入 ANSI 24-bit 颜色
-3. **mcode TUI** 调用 patched `Xc.render` 时拿到 width（content width），传给 sidecar 的渲染器
+1. **不用 `NODE_OPTIONS`** —— sidecar 由 fork 的 `cli.js` 静态 `import`，只有 TUI 入口进程会加载它。
+2. **sidecar 不自动启动** —— 轮询器在**第一次状态栏渲染**时才启动（这是"真的是 TUI"的可靠信号）。
+   子进程即使加载了 sidecar 也不会 fork 任何东西。
+3. **进程防护** —— `spawn(detached:true)` + 进程组 SIGKILL 兜底；PATH 上没 `mmx` 直接跳过；
+   连续失败 5 次后停用，5 分钟后自动恢复；stderr 截断 64KB。
 
 ## 已知 trade-offs
 
-- 每 60s fork `mmx` 一次（~30ms 开销，可忽略）
-- 首次启动 mcode 时 quota 行会先空 ~1s（首次 fetch 还没完成），sidecar 完成后 `requestRender()` 触发重绘
-- `script -qfc` 伪 TTY 默认 80 列，所以 CI 测出来的总是两行 layout
-- 颜色阈值 30/10 是从 mcode 内部 `ef()` 函数抄的；如果 mcode 改了这个阈值，patch 颜色规则不会自动跟着变
+- 每 60s fork 一次 `mmx`（约 5s，可忽略；`unref` 的定时器不阻止退出）
+- 首次渲染时 quota 行可能先空约 1–6s，数据到达后自动重绘
+- 24-bit 颜色需要终端支持（现代终端都支持）
+- `mmx` 是外部依赖：不在 PATH 或未登录时，只显示会话 tokens 行
+- `script -qfc` 伪 TTY 默认 80 列，自动化测试通常看到两行布局

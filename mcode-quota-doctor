@@ -1,107 +1,169 @@
 #!/usr/bin/env bash
-# Doctor script: verify that the mcode status-bar quota patch is in place.
+# mcodex doctor — verify the fork-isolated quota status line.
+#
 # Exit 0 = all good; non-zero = something needs attention.
+#
+# Key invariant this script exists to protect:
+#   mcode's own installation must be BYTE-IDENTICAL to the npm release.
+#   All patching happens in a private fork, never in mcode.
 set -uo pipefail
 
+QUOTA_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CODE_ROOT="${MCODE_CODE_ROOT:-$HOME/.minimax-code}"
-CURRENT_FILE="$CODE_ROOT/current"
+FORK_BASE="${MCODE_QUOTA_FORK_DIR:-$HOME/.local/share/mcode-quota/mcode-clone}"
+SIDECAR="$QUOTA_DIR/sidecar/mcode-quota-fetcher-9f8a7b.mjs"
 
 PASS=0
 FAIL=0
 WARN=0
-say() { printf "%-12s %s\n" "$1" "$2"; }
-ok()   { say "[ok]"      "$1"; PASS=$((PASS+1)); }
-fail() { say "[FAIL]"    "$1"; FAIL=$((FAIL+1)); }
-warn() { say "[warn]"    "$1"; WARN=$((WARN+1)); }
-info() { say "[info]"    "$1"; }
+say()  { printf "%-7s %s\n" "$1" "$2"; }
+ok()   { say "[ok]"   "$1"; PASS=$((PASS+1)); }
+fail() { say "[FAIL]" "$1"; FAIL=$((FAIL+1)); }
+warn() { say "[warn]" "$1"; WARN=$((WARN+1)); }
+info() { say "[info]" "$1"; }
 
 # 1. mcode installed
+CURRENT_FILE="$CODE_ROOT/current"
 if [[ -f "$CURRENT_FILE" ]]; then
-  ok "mcode current pointer: $(cat "$CURRENT_FILE")"
+  CURRENT_VERSION="$(tr -d '\r\n' < "$CURRENT_FILE")"
+  ok "mcode current: $CURRENT_VERSION"
 else
   fail "mcode current pointer missing: $CURRENT_FILE"
-  echo
-  echo "  Fix: install mcode first, or set MCODE_CODE_ROOT."
-  exit 2
-fi
-CURRENT_VERSION="$(tr -d '\r\n' < "$CURRENT_FILE")"
-
-# 2. launcher exists
-CHUNKS_DIR="$CODE_ROOT/releases/$CURRENT_VERSION/lib/node_modules/@minimax-ai/code/chunks"
-LAUNCHER="$(ls "$CHUNKS_DIR"/launcher-*.js 2>/dev/null | head -1 || true)"
-if [[ -z "$LAUNCHER" || ! -f "$LAUNCHER" ]]; then
-  fail "Launcher not found in $CHUNKS_DIR"
-  exit 2
-fi
-ok "Launcher: $LAUNCHER"
-
-# 3. backup exists
-BACKUP="$LAUNCHER.unpatched.bak"
-if [[ -f "$BACKUP" ]]; then
-  ok "Backup present (restore with: cp '$BACKUP' '$LAUNCHER')"
-else
-  warn "No backup. Run mcode-patch-quota.sh to create one."
+  echo; echo "  Fix: install mcode first, or set MCODE_CODE_ROOT."; exit 2
 fi
 
-# 4. patch anchors present
-if grep -q "__mcodeQuotaLine" "$LAUNCHER"; then
-  ok "Render hook (Xc.render) patched"
-else
-  fail "Render hook missing — run mcode-patch-quota.sh to (re)apply"
-fi
-if grep -q "__mcodeQuotaStart" "$LAUNCHER"; then
-  ok "Widget hook (jf.constructor) patched"
-else
-  fail "Widget hook missing — run mcode-patch-quota.sh to (re)apply"
-fi
+SRC_CODE="$CODE_ROOT/releases/$CURRENT_VERSION/lib/node_modules/@minimax-ai/code"
+SRC_LAUNCHER="$(ls "$SRC_CODE"/chunks/launcher-*.js 2>/dev/null | head -1 || true)"
+FORK_CODE="$FORK_BASE/$CURRENT_VERSION/code"
+FORK_LAUNCHER="$(ls "$FORK_CODE"/chunks/launcher-*.js 2>/dev/null | head -1 || true)"
 
-# 5. sidecar present
-SIDECAR="$CHUNKS_DIR/mcode-quota-fetcher-9f8a7b.mjs"
-if [[ -f "$SIDECAR" ]]; then
-  ok "Sidecar: $SIDECAR"
-else
-  fail "Sidecar missing — run mcode-patch-quota.sh"
-fi
-
-# 6. mmx available
-if command -v mmx >/dev/null 2>&1; then
-  ok "mmx on PATH: $(command -v mmx)"
-else
-  warn "mmx not on PATH — quota line will stay empty"
-fi
-
-# 7. sidecar live test (no mcode needed)
-if [[ -f "$SIDECAR" ]] && command -v mmx >/dev/null 2>&1; then
-  LINE=$(node --input-type=module -e "
-    import('$SIDECAR').then(async () => {
-      globalThis.__mcodeQuotaStart(() => {});
-      await new Promise(r => setTimeout(r, 2500));
-      process.stdout.write(globalThis.__mcodeQuotaLine || '(empty)');
-    });
-  " 2>/dev/null || echo "(test failed)")
-  if [[ -n "$LINE" && "$LINE" != "(empty)" && "$LINE" != "(test failed)" ]]; then
-    ok "Sidecar live render: $LINE"
+# 2. mcode itself must be pristine
+if [[ -n "$SRC_LAUNCHER" && -f "$SRC_LAUNCHER" ]]; then
+  if grep -q "__mcodeQuota\|__mcodeRuntime" "$SRC_LAUNCHER"; then
+    fail "mcode launcher is PATCHED — mcode must stay pristine! Run: git checkout / reinstall mcode"
   else
-    warn "Sidecar returned: $LINE  (check mmx quota show --output json)"
+    ok "mcode launcher pristine (no quota hooks)"
+  fi
+  PRISTINE_DIR="$FORK_BASE/.pristine-$CURRENT_VERSION"
+  if [[ -f "$PRISTINE_DIR/chunks/$(basename "$SRC_LAUNCHER")" ]]; then
+    if cmp -s "$SRC_LAUNCHER" "$PRISTINE_DIR/chunks/$(basename "$SRC_LAUNCHER")"; then
+      ok "mcode launcher byte-identical to pristine npm tarball"
+    else
+      fail "mcode launcher differs from pristine npm tarball"
+    fi
+  else
+    info "no pristine reference cached; skipped byte-compare"
+  fi
+else
+  fail "mcode launcher not found in $SRC_CODE/chunks"
+fi
+
+# 3. fork exists and matches the installed version
+if [[ -f "$FORK_BASE/$CURRENT_VERSION/.fork-marker" ]]; then
+  ok "fork marker: $FORK_BASE/$CURRENT_VERSION"
+else
+  warn "fork not initialized yet — run: mcodex (it builds the fork on first launch)"
+fi
+
+# 4. fork launcher patched
+if [[ -n "$FORK_LAUNCHER" && -f "$FORK_LAUNCHER" ]]; then
+  if grep -q "__mcodeQuotaRender" "$FORK_LAUNCHER"; then
+    ok "fork launcher render hook present"
+  else
+    fail "fork launcher render hook missing — re-run: mcodex"
+  fi
+else
+  warn "fork launcher not built yet"
+fi
+
+# 5. fork cli.js imports the sidecar (no NODE_OPTIONS)
+if [[ -f "$FORK_CODE/cli.js" ]]; then
+  if grep -q "mcode-quota-sidecar" "$FORK_CODE/cli.js"; then
+    ok "fork cli.js imports sidecar statically"
+  else
+    fail "fork cli.js does not import the sidecar — re-run: mcodex"
+  fi
+else
+  warn "fork cli.js not built yet"
+fi
+
+# 6. sidecar present + syntax valid
+if [[ -f "$SIDECAR" ]]; then
+  if node --check "$SIDECAR" >/dev/null 2>&1; then
+    ok "sidecar present + syntax ok: $SIDECAR"
+  else
+    fail "sidecar failed node --check: $SIDECAR"
+  fi
+else
+  fail "sidecar missing: $SIDECAR — run: mcodex"
+fi
+
+# 7. no NODE_OPTIONS leakage (the old storm root cause)
+if grep -qE '^[[:space:]]*(export[[:space:]]+)?NODE_OPTIONS=' "$QUOTA_DIR/mcodex"; then
+  fail "mcodex sets NODE_OPTIONS — this leaks the sidecar into child processes (storm risk)"
+else
+  ok "mcodex does not use NODE_OPTIONS"
+fi
+
+# 8. live render test (no mcode needed)
+if [[ -f "$SIDECAR" ]]; then
+  LIVE="$(
+    SIDECAR="$SIDECAR" node --input-type=module -e '
+      const sid = process.env.MCODE_QUOTA_TEST_SESSION || await (async () => {
+        try {
+          const { DatabaseSync } = await import("node:sqlite");
+          const db = new DatabaseSync(process.env.HOME + "/.minimax/v2/sqlite/runtime-state.sqlite", { readOnly: true });
+          const row = db.prepare("SELECT session_id FROM local_runtime_token_usage ORDER BY ts DESC LIMIT 1").get();
+          return row ? row.session_id : "";
+        } catch { return ""; }
+      })();
+      await import(process.env.SIDECAR);
+      globalThis.__mcodeShellState = { agentSessionId: sid };
+      globalThis.__mcodeQuotaRender(140);
+      await new Promise((r) => setTimeout(r, 6000));
+      process.stdout.write(globalThis.__mcodeQuotaRender(140).join("\n"));
+    ' 2>/dev/null || echo "(live test failed)"
+  )"
+  CLEAN="$(printf '%s' "$LIVE" | sed -E 's/\x1b\[[0-9;]*[A-Za-z]//g')"
+  if printf '%s' "$CLEAN" | grep -q "5小时使用量" && printf '%s' "$CLEAN" | grep -q "周使用量"; then
+    ok "live render: $(printf '%s' "$CLEAN" | head -1 | cut -c1-100)"
+  else
+    warn "live render produced no quota line (mmx may be down). Raw: $(printf '%s' "$CLEAN" | head -c120)"
+  fi
+  if printf '%s' "$CLEAN" | grep -q "会话 tokens"; then
+    ok "session tokens line: $(printf '%s' "$CLEAN" | grep -o '会话 tokens [^·]*' | head -1 | cut -c1-60)"
+  else
+    info "session tokens line not present (no session row yet?)"
   fi
 fi
 
-# 8. wrapper present
-WRAPPER="$HOME/.minimax/bin/mcode-with-quota"
-if [[ -x "$WRAPPER" ]]; then
-  ok "Wrapper: $WRAPPER (launch with: mcode-with-quota)"
-else
-  warn "Wrapper missing — install it to skip manual NODE_OPTIONS"
-fi
-
-# 9. mmx login state (best effort)
+# 9. mmx available + logged in
 if command -v mmx >/dev/null 2>&1; then
-  AUTH=$(mmx auth status --output json 2>/dev/null | head -c 200 || true)
-  if [[ -n "$AUTH" ]] && ! echo "$AUTH" | grep -qi "not.*sign\|login.*required\|not_logged"; then
+  ok "mmx on PATH: $(command -v mmx)"
+  AUTH="$(mmx auth status --output json 2>/dev/null | head -c 200 || true)"
+  if [[ -n "$AUTH" ]] && ! printf '%s' "$AUTH" | grep -qi "not.*sign\|login.*required\|not_logged"; then
     ok "mmx appears logged in"
   else
     warn "mmx may not be logged in — quota line will stay empty"
   fi
+else
+  warn "mmx not on PATH — quota line will stay empty"
+fi
+
+# 10. PATH entrypoint
+if [[ -x "$HOME/.minimax/bin/mcodex" ]]; then
+  ok "PATH entry: ~/.minimax/bin/mcodex"
+else
+  warn "PATH entry missing: ~/.minimax/bin/mcodex (launch with $QUOTA_DIR/mcodex)"
+fi
+
+# 11. no stale mcodex/mmx processes from a previous storm
+STRAY_MMX="$(pgrep -fc 'mmx quota show' 2>/dev/null || true)"
+STRAY_MMX="${STRAY_MMX:-0}"
+if [[ "$STRAY_MMX" -gt 2 ]]; then
+  warn "$STRAY_MMX concurrent 'mmx quota show' processes — possible storm"
+else
+  ok "no mmx process storm (concurrent: $STRAY_MMX)"
 fi
 
 echo

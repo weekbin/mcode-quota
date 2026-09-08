@@ -2,6 +2,66 @@
 
 记录每次对工具集的修改。新条目加在最上面。
 
+## 2026-09-08 — v2.0.0：fork 隔离架构 + mcodex
+
+**背景**：v1.x 直接 patch mcode 本体的 launcher，一旦 patch 有 bug，
+用 mcode 排查问题时排查不到根源，且**不断拉起僵尸进程**。用户要求重新设计隔离架构。
+
+### 架构（重写）
+
+- **不再修改 mcode 本体**。mcode 的 `~/.minimax-code/**` 保持与 npm 官方包字节一致。
+- **fork 来源改为 npm 官方 tarball**：`npm pack @minimax-ai/code@<版本>` →
+  `tarballs/` 缓存 → 解压到 `.pristine-<版本>/` → 真实拷贝到 `<版本>/code/`。
+  （早期草案从已安装目录 symlink 镜像，有两个致命问题：① 顶层 symlink 导致 `chunks/`
+  根本不会被实拷贝，patch 会落到源安装上；② Node realpath 会把 symlink 的 `cli.js`
+  解析回源安装，相对 import 绕过 patch。改为**真实拷贝**彻底规避。）
+- **两处 patch**：
+  1. fork 的 `chunks/launcher-*.js` — 在 widget 类体末尾插入 `render()` 覆盖
+     （`super.render()` + 注入 runtime/shellState/widget + 追加配额行）
+  2. fork 的 `cli.js` — 静态 `import "<sidecar>"`
+- 入口从 `mcode-with-quota` 改名为 **`mcodex`**；PATH stub 同步替换。
+- patcher CLI 改为 `--fork-base` / `--sidecar` / `--current` / `--registry` / `--offline`。
+
+### 修复僵尸进程风暴（根因）
+
+根因是 `NODE_OPTIONS=--import=<sidecar>`：该环境变量被 mcode 派生的**所有子进程**继承，
+每个子进程都加载 sidecar 并各自 fork `mmx`，进程数指数级爆炸。修复：
+
+1. 弃用 `NODE_OPTIONS`，改由 fork 的 `cli.js` 静态 import —— 只有 TUI 入口进程加载。
+2. sidecar **不再自动启动**：轮询器在**第一次状态栏渲染**时才启动（子进程不渲染 → 不 fork）。
+3. 保留进程防护：`detached:true` + 进程组 SIGKILL、`isMmxOnPath()` 探测、
+   连续失败 5 次停用 + 5 分钟自动恢复、stderr 64KB 上限、定时器 `unref()`。
+
+### 文案中文化
+
+- `Session` → **会话 tokens**
+- `5-hour` → **5小时使用量**
+- `Weekly` → **周使用量**
+- 附带：`left` → 剩余、`resets in` → 重置、`(no data)` → （无数据）、
+  `in/out/cache` → 输入/输出/缓存
+
+### 显示正确性
+
+- 新增 CJK 宽度计算（CJK 按 2 列），排版按真实显示宽度收缩进度条，修复 95 列溢出。
+- 会话 token 兜底修正：runtime API 返回全 0 或结构异常时，自动回落到 sqlite
+  （`local_runtime_token_usage`），避免把有数据的会话显示成 0。
+- 实测：新会话 `会话 tokens 25K (输入 619 · 输出 13 · 缓存 25K)`，与 sqlite 的 25,208 一致。
+
+### 验证
+
+- 单元测试：宽度 140 / 95 / 60 均不溢出；runtime 路径与 sqlite 路径均正确。
+- 集成测试（pty 真 TUI）：`mcodex` 渲染出中文标签；进程采样
+  `max clone=1, max mmx=0, max zombie=0`，无风暴。
+- `mcode-quota-doctor`：14 ok / 0 warn / 0 fail。
+
+### 清理
+
+- 恢复 mcode launcher 为 npm 官方版本（sha256 `fb92932…`）。
+- 删除历史遗留：`launcher-*.js.unpatched.bak`、`mcode-quota-fetcher-*.mjs`、
+  `*.bak.stormquake`。
+- 删除 `~/.minimax/bin/mcode-with-quota`，新增 `~/.minimax/bin/mcodex`。
+
+
 ## 2026-09-08 — 初始版本 + 4 轮迭代
 
 ### v1.0（首版）

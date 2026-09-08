@@ -1,64 +1,100 @@
 #!/usr/bin/env node
 // mcode-patch-quota.mjs
 //
-// Universal mcode status-bar quota patcher. Idempotent. No hardcoded
-// obfuscated short names — anchors are discovered by structural matching.
+// Fork-isolated patcher for the mcodex quota status line.
+//
+// PRINCIPLE: mcode's own installation is NEVER modified. We download a
+// pristine copy of the exact installed release straight from the npm
+// registry, keep it in a private fork directory, and patch ONLY the fork.
+// If the fork is broken, delete it and re-run — mcode is untouched.
+//
+// Modes / flags:
+//   --src=PATH          installed mcode release dir (fallback source only)
+//   --fork-base=PATH    where forks + tarball cache live
+//   --sidecar=PATH      where to write the sidecar module
+//   --current=VERSION   mcode version (e.g. 0.3.10)
+//   --registry=URL      npm registry (default registry.npmjs.org)
+//   --offline           never hit the network; use cached tarball or --src
 //
 // What it does:
-//   1. Resolves the current mcode launcher from $MCODE_CODE_ROOT (or
-//      ~/.minimax-code). Refuses to run if launcher missing.
-//   2. Backs up the launcher on first touch (one backup per release).
-//   3. If the launcher is already patched (differs from backup), exits 0.
-//   4. Calls mcode-find-anchors.mjs to locate:
-//        - WIDGET class (extends status renderer base)
-//        - WIDGET_BODY_END (position of the class's closing `}`)
-//        - CTOR_END      (position of the constructor's closing `}`)
-//   5. Edits the launcher in two places, byte-exact:
-//        a) right after CTOR_END: insert a `static { ... }` block
-//           (ES2022 class field; the only construct that allows arbitrary
-//           statements at the class body's top level) that:
-//              - wraps the prototype's setState to capture the widget's
-//                `runtime` and merged `shellState` to globalThis on every
-//                call, so the sidecar can use them;
-//              - calls globalThis.__mcodeQuotaStart to kick off the
-//                background fetchers (mmx quota + session tokens).
-//        b) right before WIDGET_BODY_END: insert a `render()` method
-//           that wraps super.render() and appends sidecar-rendered lines.
-//   6. Writes the mcode-quota-fetcher sidecar into the launcher chunks dir.
-//   7. Verifies the patched launcher with `node --check`; rolls back on failure.
+//   1. Ensure a pristine tarball for <version> is cached locally
+//      (npm pack @minimax-ai/code@<version>)
+//   2. Materialize <fork-base>/<version>/code as a REAL copy of the
+//      pristine package (no symlinks — avoids realpath/patch bypass)
+//   3. Patch the fork's launcher chunk: override render() to capture
+//      runtime/shellState and append quota lines
+//   4. Patch the fork's cli.js: import the sidecar directly (no
+//      NODE_OPTIONS — that env is inherited by every child mcode spawns
+//      and was the root cause of the process storm)
+//   5. Write the sidecar + node --check everything
+//
+// Idempotent: a .fork-marker records the version + source hash; a fast
+// path skips all work when the fork is already correct.
 
-import { readFileSync, writeFileSync, copyFileSync, existsSync, readdirSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, readdirSync,
+         mkdirSync, rmSync, cpSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { createHash } from "node:crypto";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const FIND_ANCHORS = join(__dirname, "mcode-find-anchors.mjs");
+const PKG = "@minimax-ai/code";
 
 // ============================================================================
-// Sidecar body (kept inline to make the patcher self-contained).
-// Inlined as a const so we can `writeFileSync` it after splicing the launcher.
+// CLI args
+// ============================================================================
+const argv = process.argv.slice(2);
+function getArg(name) {
+  const flag = `--${name}=`;
+  const found = argv.find((a) => a.startsWith(flag));
+  return found ? found.slice(flag.length) : null;
+}
+const SRC = getArg("src");
+const FORK_BASE = getArg("fork-base");
+const SIDECAR_PATH = getArg("sidecar");
+const CURRENT_VERSION = getArg("current") || "0.0.0";
+const REGISTRY = getArg("registry") || "https://registry.npmjs.org/";
+const OFFLINE = argv.includes("--offline");
+
+if (!FORK_BASE || !SIDECAR_PATH) {
+  process.stderr.write(
+    "usage: node mcode-patch-quota.mjs --fork-base=<dir> --sidecar=<out.mjs> --current=<version> [--src=<release-dir>] [--registry=<url>] [--offline]\n",
+  );
+  process.exit(2);
+}
+
+const log = (m) => process.stderr.write(`[mcode-quota] ${m}\n`);
+
+const FORK_DIR = join(FORK_BASE, CURRENT_VERSION);
+const FORK_CODE = join(FORK_DIR, "code");
+const TARBALL_DIR = join(FORK_BASE, "tarballs");
+const TARBALL_PATH = join(TARBALL_DIR, `minimax-ai-code-${CURRENT_VERSION}.tgz`);
+
+// ============================================================================
+// Sidecar body
+// ============================================================================
+const SIDECAR_BODY = `// mcodex quota sidecar — generated by mcode-patch-quota.mjs. DO NOT EDIT.
 //
-// Data sources:
-//   - mmx CLI: `mmx quota show --output json --quiet` → 5h + weekly remaining
-//   - mcode runtime: getSessionUsageSummary(agentSessionId) → input / output /
-//     cache_read / reasoning tokens for the current mcode session
-// Bridge: the patched static block captures the widget's `this.runtime` and
-//   the latest setState merge (`shellState`) into globalThis. The sidecar
-//   reads them to call the runtime API. No env vars, no IPC — same V8 isolate.
-// ============================================================================
-const SIDECAR_BODY = `import { spawn } from "node:child_process";
-import { createRequire as _mcodeQuotaReq } from "node:module";
+// Loaded by the fork's cli.js via a static import, so it only ever runs in
+// processes that import the TUI entry. It does NOT auto-start: the pollers
+// start lazily on the first status-line render. This is deliberate — an
+// unconditional auto-start (plus NODE_OPTIONS inheritance) is what caused
+// the earlier process storm.
+import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-const _require = _mcodeQuotaReq(import.meta.url);
-const CACHE_TTL_MS = 60_000;
-const FETCH_TIMEOUT_MS = 20_000;   // mmx can be slow on a busy network
-const SESSION_TTL_MS = 10_000;
 
-let raw = { valid: false, dRem: null, dReset: "", wRem: null, wReset: "", fetchedAt: 0 };
+const CACHE_TTL_MS = 60_000;
+const FETCH_TIMEOUT_MS = 20_000;
+const SESSION_TTL_MS = 10_000;
+const REFRESH_MIN_INTERVAL_MS = 500;
+
+let raw = { valid: false, dRem: null, dReset: "", wRem: null, wReset: "", fetchedAt: 0, lastSuccessAt: 0 };
 let session = { valid: false, total: 0, input: 0, output: 0, cache: 0, reasoning: 0, sessionId: null, fetchedAt: 0 };
-let onUpdateCb = null;
+let started = false;
 let sessionTimer = null;
+let lastRefreshAt = 0;
 
 const C_SUCCESS = "38;2;60;160;90";
 const C_WARNING = "38;2;200;150;40";
@@ -68,10 +104,45 @@ const C_RESET   = "0";
 const C_LABEL   = "38;2;180;180;180";
 
 const MAX_BAR_WIDTH = 20;
-const MIN_BAR_WIDTH = 12;
+const MIN_BAR_WIDTH = 8;
+
+const L_LABEL_5H = "\u0035\u5c0f\u65f6\u4f7f\u7528\u91cf";      // 5小时使用量
+const L_LABEL_WEEK = "\u5468\u4f7f\u7528\u91cf";                  // 周使用量
+const L_LABEL_SESSION = "\u4f1a\u8bdd tokens";                    // 会话 tokens
+const L_LEFT = "\u5269\u4f59";                                    // 剩余
+const L_RESET = "\u91cd\u7f6e";                                   // 重置
+const L_NO_DATA = "\u65e0\u6570\u636e";                           // 无数据
+const L_IN = "\u8f93\u5165";                                      // 输入
+const L_OUT = "\u8f93\u51fa";                                     // 输出
+const L_CACHE = "\u7f13\u5b58";                                   // 缓存
+
+const ESC = "\\u001b[";
+const RESET_SEQ = ESC + C_RESET + "m";
 
 const pct = (n) =>
   typeof n === "number" && Number.isFinite(n) ? Math.max(0, Math.min(100, n)) : null;
+
+// Display width: CJK counts as 2 columns, ANSI escapes as 0.
+const ANSI_RE = new RegExp("\\\\u001b\\\\[[0-9;]*m", "g");
+function dw(s) {
+  const t = String(s).replace(ANSI_RE, "");
+  let w = 0;
+  for (const ch of t) {
+    const cp = ch.codePointAt(0);
+    const wide =
+      (cp >= 0x1100 && cp <= 0x115f) ||
+      cp === 0x2329 || cp === 0x232a ||
+      (cp >= 0x2e80 && cp <= 0xa4cf && cp !== 0x303f) ||
+      (cp >= 0xac00 && cp <= 0xd7a3) ||
+      (cp >= 0xf900 && cp <= 0xfaff) ||
+      (cp >= 0xfe30 && cp <= 0xfe6f) ||
+      (cp >= 0xff00 && cp <= 0xff60) ||
+      (cp >= 0xffe0 && cp <= 0xffe6) ||
+      (cp >= 0x20000 && cp <= 0x3fffd);
+    w += wide ? 2 : 1;
+  }
+  return w;
+}
 
 const fmtReset = (ms) => {
   if (typeof ms !== "number" || !Number.isFinite(ms) || ms <= 0) return "";
@@ -79,10 +150,10 @@ const fmtReset = (ms) => {
   const d = Math.floor(totalSec / 86400);
   const h = Math.floor((totalSec % 86400) / 3600);
   const m = Math.floor((totalSec % 3600) / 60);
-  if (d > 0) return \`\${d}d \${h}h\`;
-  if (h > 0) return \`\${h}h \${m}m\`;
-  if (m > 0) return \`\${m}m\`;
-  return \`\${totalSec}s\`;
+  if (d > 0) return String(d) + "d " + h + "h";
+  if (h > 0) return h + "h " + m + "m";
+  if (m > 0) return m + "m";
+  return totalSec + "s";
 };
 
 const colorFor = (rem) =>
@@ -90,30 +161,29 @@ const colorFor = (rem) =>
 
 const buildBar = (rem, width) => {
   const w = Math.max(MIN_BAR_WIDTH, Math.min(MAX_BAR_WIDTH, width | 0));
-  if (rem == null) return { text: "░".repeat(w), colored: false };
+  if (rem == null) return { text: "\\u2591".repeat(w), colored: false };
   const c = colorFor(rem);
   const filled = Math.max(0, Math.min(w, Math.round((rem / 100) * w)));
   const empty = w - filled;
-  const filledSeq = "\\x1b[" + c + "m" + "█".repeat(filled) + "\\x1b[" + C_RESET + "m";
-  const emptySeq  = "\\x1b[" + C_MUTED + "m" + "░".repeat(empty) + "\\x1b[" + C_RESET + "m";
+  const filledSeq = ESC + c + "m" + "\\u2588".repeat(filled) + RESET_SEQ;
+  const emptySeq  = ESC + C_MUTED + "m" + "\\u2591".repeat(empty) + RESET_SEQ;
   return { text: filledSeq + emptySeq, colored: true };
 };
 
 const pickGeneral = (rows) =>
   Array.isArray(rows) ? (rows.find((r) => r?.model_name === "general") || rows[0] || null) : null;
 
-function renderOne(label, rem, reset, barWidth) {
-  if (rem == null) {
-    return "\\x1b[" + C_MUTED + "m" + label + "\\x1b[" + C_RESET + "m" + "  (no data)";
-  }
+const label = (s) => ESC + C_LABEL + "m" + s + RESET_SEQ;
+const muted = (s) => ESC + C_MUTED + "m" + s + RESET_SEQ;
+const dot = () => muted("\\u00b7");
+
+function renderOne(text, rem, reset, barWidth) {
+  if (rem == null) return label(text) + "  " + muted("(" + L_NO_DATA + ")");
   const c = colorFor(rem);
-  const labelSeq = "\\x1b[" + C_LABEL + "m" + label + "\\x1b[" + C_RESET + "m";
   const barSeq = buildBar(rem, barWidth).text;
-  const pctSeq = "\\x1b[" + c + "m" + rem + "% left\\x1b[" + C_RESET + "m";
-  const tail = reset
-    ? "  \\x1b[" + C_MUTED + "m· resets in " + reset + "\\x1b[" + C_RESET + "m"
-    : "";
-  return labelSeq + " [" + barSeq + "] " + pctSeq + tail;
+  const pctSeq = ESC + c + "m" + rem + "% " + L_LEFT + RESET_SEQ;
+  const tail = reset ? "  " + muted(dot() + " " + L_RESET + " " + reset) : "";
+  return label(text) + " [" + barSeq + "] " + pctSeq + tail;
 }
 
 const fmtTok = (n) => {
@@ -125,97 +195,79 @@ const fmtTok = (n) => {
 
 function renderSessionChunk() {
   if (!session.valid) return null;
-  const labelSeq = "\\x1b[" + C_LABEL + "m" + "Session" + "\\x1b[" + C_RESET + "m";
-  const totalSeq = "\\x1b[" + C_SUCCESS + "m" + fmtTok(session.total) + "\\x1b[" + C_RESET + "m";
-  const dot = "\\x1b[" + C_MUTED + "m·\\x1b[" + C_RESET + "m";
-  const detail = " (in " + fmtTok(session.input) + " " + dot + " out " + fmtTok(session.output) + " " + dot + " cache " + fmtTok(session.cache) + ")";
-  return labelSeq + " " + totalSeq + detail;
+  const totalSeq = ESC + C_SUCCESS + "m" + fmtTok(session.total) + RESET_SEQ;
+  const d = " " + dot() + " ";
+  const detail = " (" + L_IN + " " + fmtTok(session.input) + d +
+                 L_OUT + " " + fmtTok(session.output) + d +
+                 L_CACHE + " " + fmtTok(session.cache) + ")";
+  return label(L_LABEL_SESSION) + " " + totalSeq + detail;
 }
 
+const SEP = "  " + ESC + C_MUTED + "m\\u00b7" + RESET_SEQ + "  ";
 const HORIZ_MIN_WIDTH = 110;
 const NARROW_MIN_WIDTH = 80;
 
+// Render a single quota line at the widest bar that still fits the width.
+function fit(build, width) {
+  for (let bar = MAX_BAR_WIDTH; bar >= MIN_BAR_WIDTH; bar--) {
+    const s = build(bar);
+    if (dw(s) <= width) return s;
+  }
+  return build(MIN_BAR_WIDTH);
+}
+
 globalThis.__mcodeQuotaRender = function (width) {
-  if (width == null || width < 0) width = 0;
-  const sep = "  \\x1b[" + C_MUTED + "m·\\x1b[" + C_RESET + "m  ";
+  if (width == null || !Number.isFinite(width) || width < 0) width = 0;
   const sess = renderSessionChunk();
   const lines = [];
   if (raw.valid) {
+    // Horizontal omits reset times to save room; the other layouts keep them.
+    const q5h = (bar) => renderOne(L_LABEL_5H, raw.dRem, "", bar);
+    const qwh = (bar) => renderOne(L_LABEL_WEEK, raw.wRem, "", bar);
+    const q5 = (bar) => renderOne(L_LABEL_5H, raw.dRem, raw.dReset, bar);
+    const qw = (bar) => renderOne(L_LABEL_WEEK, raw.wRem, raw.wReset, bar);
+
     if (width >= HORIZ_MIN_WIDTH) {
-      const barWidth = Math.max(12, Math.floor((width - (sess ? 65 : 40)) / 2));
-      const line1 = renderOne("5-hour", raw.dRem, "", barWidth);
-      const line2 = renderOne("Weekly", raw.wRem, "", barWidth);
-      lines.push(line1 + sep + line2 + (sess ? sep + sess : ""));
+      lines.push(fit((bar) => q5h(bar) + SEP + qwh(bar) + (sess ? SEP + sess : ""), width));
     } else if (width >= NARROW_MIN_WIDTH) {
-      const barWidth = Math.max(12, Math.floor((width - (sess ? 55 : 38)) / 2));
-      const weeklyBarWidth = Math.max(10, barWidth - (sess ? 6 : 0));
-      lines.push(renderOne("5-hour", raw.dRem, raw.dReset, barWidth));
-      lines.push(renderOne("Weekly", raw.wRem, raw.wReset, weeklyBarWidth) + (sess ? sep + sess : ""));
+      lines.push(fit(q5, width));
+      const combined = fit((bar) => qw(bar) + (sess ? SEP + sess : ""), width);
+      if (dw(combined) <= width) {
+        lines.push(combined);
+      } else {
+        // Weekly + session still do not fit together: split onto 3 lines.
+        lines.push(fit(qw, width));
+        if (sess) lines.push(sess);
+      }
     } else {
-      const barWidth = Math.max(12, width - 38);
-      lines.push(renderOne("5-hour", raw.dRem, raw.dReset, barWidth));
-      lines.push(renderOne("Weekly", raw.wRem, raw.wReset, barWidth));
+      lines.push(fit(q5, width));
+      lines.push(fit(qw, width));
       if (sess) lines.push(sess);
     }
   } else if (sess) {
     lines.push(sess);
   }
+  // First render is a reliable "this is the real TUI" signal — start then.
+  if (!started) start();
   return lines;
 };
 
-globalThis.__mcodeQuotaStart = function (onUpdate) {
-  onUpdateCb = onUpdate;
-  const tick = async () => {
-    if (Date.now() - raw.fetchedAt > CACHE_TTL_MS) {
-      await fetchQuotaOnce();
-    } else {
-      onUpdateCb?.();
-    }
-  };
-  tick();
-  const id = setInterval(tick, CACHE_TTL_MS);
-  if (typeof id.unref === "function") id.unref();
-  startSessionPoller();
-  return id;
-};
+function requestRefresh() {
+  const now = Date.now();
+  if (now - lastRefreshAt < REFRESH_MIN_INTERVAL_MS) return;
+  lastRefreshAt = now;
+  const w = globalThis.__mcodeQuotaWidget;
+  try {
+    if (w && typeof w.requestRender === "function") w.requestRender();
+  } catch {}
+}
 
-// Auto-start polling on import. The previous design required the launcher
-// to call __mcodeQuotaStart from a static { } block, but we removed that
-// patch payload. The sidecar can run on its own — fetchSessionOnce is a
-// no-op when globalThis.__mcodeRuntime / __mcodeShellState are missing,
-// and the render() wrapper in the launcher will populate them on the
-// first frame.
-// We defer to queueMicrotask so the function bodies (fetchQuotaOnce etc.)
-// are fully initialized before we trigger the first tick.
-queueMicrotask(() => {
-  if (typeof globalThis.__mcodeQuotaStart === "function") {
-    globalThis.__mcodeQuotaStart(() => {});
-  }
-});
-
-// ---- mmx invocation: fail-fast, fail-safe -------------------------------
-// Critical: the sidecar can be loaded by many mcode CLI processes at once
-// (e.g., when the user runs mcode-with-quota in several terminals). If
-// mmx hangs or fails, the previous design would SIGKILL after 5s — but
-// Node's child_process.spawn with stdio:pipe creates a watcher process
-// that can survive SIGKILL and turn into a zombie, multiplying across
-// instances. The fix:
-//   1. detached: true — child gets its own process group, so we can
-//      SIGKILL the whole tree via process.kill(-pid, "SIGKILL").
-//   2. isMmxOnPath() probe — short-circuit if mmx isn't installed.
-//   3. Failure-count cap (MMX_MAX_FAILURES) — stop trying after N fails.
-//   4. The interval is unref()'d so it doesn't keep the Node process
-//      alive past the launcher.
+// ============================================================================
+// mmx quota
+// ============================================================================
 let mmxAvailable = null;
 let mmxFailureCount = 0;
-// Cap is per session. 20s × 10 = 200s of "no quota" if mmx is broken —
-// we don't give up too eagerly because mmx is occasionally slow (~5s on
-// the user's network). 5 failed ticks covers a 5-minute outage, which is
-// the right trade-off: stay quiet during a transient mmx failure but
-// re-attempt when the user thinks it's been long enough.
 const MMX_MAX_FAILURES = 5;
-// After this many seconds since the last success, reset the failure
-// counter so a recovered mmx gets a fresh chance. 5 minutes.
 const MMX_FAILURE_RESET_MS = 5 * 60_000;
 
 function isMmxOnPath() {
@@ -270,12 +322,9 @@ const runMmx = () =>
 
 const fetchQuotaOnce = async () => {
   if (mmxFailureCount >= MMX_MAX_FAILURES) {
-    // After a long quiet period, give mmx a fresh chance — it may have
-    // recovered from a transient outage.
     if (raw.lastSuccessAt && Date.now() - raw.lastSuccessAt > MMX_FAILURE_RESET_MS) {
       mmxFailureCount = 0;
     } else {
-      onUpdateCb?.();
       return;
     }
   }
@@ -296,24 +345,18 @@ const fetchQuotaOnce = async () => {
   } catch (e) {
     mmxFailureCount++;
     raw = { ...raw, fetchedAt: Date.now() };
-    if (mmxFailureCount >= MMX_MAX_FAILURES) {
-      raw = { ...raw, valid: false };
-    }
+    if (mmxFailureCount >= MMX_MAX_FAILURES) raw = { ...raw, valid: false };
   } finally {
-    onUpdateCb?.();
+    requestRefresh();
   }
 };
 
-// ---- SQLite direct fallback ---------------------------------------------
-// mcode's runtime stores per-turn token usage in
-// ~/.minimax/v2/sqlite/runtime-state.sqlite, table local_runtime_token_usage.
-// This matches the schema that the runtime's own summarizeBySession() reads
-// from (see chunk-CTHP2I62.js). If the runtime API ever goes away or
-// returns nothing, we can read the same data directly.
-let sqliteDb = null;
-let sqliteDbPath = null;
-const SQLITE_DEFAULT_PATH = (process.env.MCODE_QUOTA_SQLITE
-  || (process.env.HOME || "~") + "/.minimax/v2/sqlite/runtime-state.sqlite");
+// ============================================================================
+// session tokens
+// ============================================================================
+let sqliteModPromise = null;
+const SQLITE_DEFAULT_PATH = process.env.MCODE_QUOTA_SQLITE
+  || (process.env.HOME || "~") + "/.minimax/v2/sqlite/runtime-state.sqlite";
 const SQLITE_SESSION_SQL = "SELECT " +
   "COALESCE(SUM(input_tokens), 0) AS inputTokens, " +
   "COALESCE(SUM(output_tokens), 0) AS outputTokens, " +
@@ -324,52 +367,39 @@ const SQLITE_SESSION_SQL = "SELECT " +
   "COUNT(*) AS turns " +
   "FROM local_runtime_token_usage WHERE session_id = ?";
 
-let _nodeSqlite = null;
-async function getNodeSqlite() {
-  if (_nodeSqlite) return _nodeSqlite;
-  // node:sqlite is a built-in module in Node 22+ (mcode uses Node 24).
-  // Dynamic import because the sidecar is itself an ESM module.
-  _nodeSqlite = await import("node:sqlite");
-  return _nodeSqlite;
-}
+let sqliteDb = null;
+let sqliteDbPath = null;
 
-function openSqlite(path) {
-  if (sqliteDb && sqliteDbPath === path) return sqliteDb;
-  if (sqliteDb) { try { sqliteDb.close(); } catch {} sqliteDb = null; sqliteDbPath = null; }
-  // node:sqlite's DatabaseSync is sync. We use createRequire to load
-  // it from CJS so we can use the synchronous API.
-  const { createRequire } = _require("node:module");
-  const req = createRequire(import.meta.url);
-  const { DatabaseSync } = req("node:sqlite");
-  sqliteDb = new DatabaseSync(path, { readOnly: true });
-  sqliteDbPath = path;
-  return sqliteDb;
-}
-
-function fetchSessionFromSqlite(sessionId) {
-  // Try the default path first, then a few common alternates.
-  const candidates = [SQLITE_DEFAULT_PATH];
-  // Also accept paths derived from $MCODE_CODE_ROOT if it's a dev layout.
-  for (const p of candidates) {
-    try {
-      const db = openSqlite(p);
-      const row = db.prepare(SQLITE_SESSION_SQL).get(sessionId);
-      if (!row) return null;
-      return {
-        inputTokens: Number(row.inputTokens ?? 0),
-        outputTokens: Number(row.outputTokens ?? 0),
-        reasoningTokens: Number(row.reasoningTokens ?? 0),
-        cacheReadTokens: Number(row.cacheReadTokens ?? 0),
-        cacheWriteTokens: Number(row.cacheWriteTokens ?? 0),
-        costUsd: Number(row.costUsd ?? 0),
-        turns: Number(row.turns ?? 0),
-      };
-    } catch {
-      // Try next candidate
+async function fetchSessionFromSqlite(sessionId) {
+  try {
+    if (!sqliteModPromise) sqliteModPromise = import("node:sqlite");
+    const { DatabaseSync } = await sqliteModPromise;
+    if (!sqliteDb || sqliteDbPath !== SQLITE_DEFAULT_PATH) {
+      if (sqliteDb) { try { sqliteDb.close(); } catch {} }
+      sqliteDb = new DatabaseSync(SQLITE_DEFAULT_PATH, { readOnly: true });
+      sqliteDbPath = SQLITE_DEFAULT_PATH;
     }
+    const row = sqliteDb.prepare(SQLITE_SESSION_SQL).get(sessionId);
+    if (!row) return null;
+    return {
+      inputTokens: Number(row.inputTokens ?? 0),
+      outputTokens: Number(row.outputTokens ?? 0),
+      reasoningTokens: Number(row.reasoningTokens ?? 0),
+      cacheReadTokens: Number(row.cacheReadTokens ?? 0),
+      cacheWriteTokens: Number(row.cacheWriteTokens ?? 0),
+      costUsd: Number(row.costUsd ?? 0),
+      turns: Number(row.turns ?? 0),
+    };
+  } catch {
+    return null;
   }
-  return null;
 }
+
+const sumTotal = (s) => {
+  if (!s) return 0;
+  const n = (x) => (Number.isFinite(Number(x)) ? Number(x) : 0);
+  return n(s.inputTokens) + n(s.outputTokens) + n(s.cacheReadTokens);
+};
 
 async function fetchSessionOnce() {
   const runtime = globalThis.__mcodeRuntime;
@@ -377,214 +407,313 @@ async function fetchSessionOnce() {
   if (!shell) return;
   const sessionId = shell.agentSessionId;
   if (!sessionId) return;
-  // Skip if same session is still fresh
   if (session.sessionId === sessionId && Date.now() - session.fetchedAt < SESSION_TTL_MS) return;
   let summary = null;
   let source = "runtime";
-  // Path 1: mcode runtime API. Returns the summary object directly.
-  // See chunk-CTHP2I62.js: getSessionUsageSummary -> content.getSessionUsageSummary
-  //   -> usage.summarizeSession -> store.summarizeBySession (raw row → cE(row))
-  // cE returns {inputTokens, outputTokens, reasoningTokens, cacheReadTokens,
-  //   cacheWriteTokens, totalTokens, costUsd, turns}.
   try {
-    const fn = runtime.getSessionUsageSummary;
+    const fn = runtime?.getSessionUsageSummary;
     if (typeof fn === "function") {
       const result = await Promise.resolve().then(() => fn.call(runtime, sessionId));
       if (result && typeof result === "object") summary = result;
     }
-  } catch {
-    // fall through to sqlite
-  }
-  // Path 2: sqlite fallback. Same schema, no in-process coupling.
-  if (!summary) {
-    try {
-      summary = fetchSessionFromSqlite(sessionId);
-      source = summary ? "sqlite" : "none";
-    } catch {
-      source = "none";
+  } catch {}
+  // The runtime API can report all-zero before a turn is flushed, or return
+  // an unexpected shape. Fall back to sqlite whenever it holds real numbers.
+  if (!summary || sumTotal(summary) === 0) {
+    const fb = await fetchSessionFromSqlite(sessionId);
+    if (fb && (!summary || sumTotal(fb) > 0)) {
+      summary = fb;
+      source = "sqlite";
     }
   }
   if (!summary) {
     session = { ...session, sessionId, fetchedAt: Date.now() };
-    onUpdateCb?.();
+    requestRefresh();
     return;
   }
   const input = Number(summary.inputTokens ?? 0);
   const output = Number(summary.outputTokens ?? 0);
   const cache = Number(summary.cacheReadTokens ?? 0);
   const reasoning = Number(summary.reasoningTokens ?? 0);
-  const total = input + output + cache;
   session = {
     valid: true,
-    total, input, output, cache, reasoning,
+    total: input + output + cache,
+    input, output, cache, reasoning,
     sessionId,
     turns: Number(summary.turns ?? 0),
     source,
     fetchedAt: Date.now(),
   };
-  onUpdateCb?.();
+  requestRefresh();
 }
 
-function startSessionPoller() {
-  if (sessionTimer) return;
+// ============================================================================
+// lifecycle — LAZY. Nothing runs until the TUI renders its first frame.
+// ============================================================================
+function start() {
+  if (started) return;
+  started = true;
+  if (process.env.MCODE_QUOTA_DISABLE === "1") return;
+
+  fetchQuotaOnce();
+  const quotaTimer = setInterval(fetchQuotaOnce, CACHE_TTL_MS);
+  if (typeof quotaTimer.unref === "function") quotaTimer.unref();
+
   fetchSessionOnce();
   sessionTimer = setInterval(fetchSessionOnce, SESSION_TTL_MS);
   if (typeof sessionTimer.unref === "function") sessionTimer.unref();
 }
+
+globalThis.__mcodeQuotaStart = start;
 `;
 
 // ============================================================================
-// Step 1: resolve launcher
+// Pristine source acquisition
 // ============================================================================
-const CODE_ROOT = process.env.MCODE_CODE_ROOT || `${process.env.HOME}/.minimax-code`;
-const CURRENT_FILE = join(CODE_ROOT, "current");
-if (!existsSync(CURRENT_FILE)) {
-  process.stderr.write(`mcode current pointer not found: ${CURRENT_FILE}\n`);
-  process.exit(1);
-}
-const CURRENT_VERSION = readFileSync(CURRENT_FILE, "utf-8").trim();
-const CHUNKS_DIR = join(CODE_ROOT, "releases", CURRENT_VERSION, "lib", "node_modules", "@minimax-ai", "code", "chunks");
-if (!existsSync(CHUNKS_DIR)) {
-  process.stderr.write(`chunks dir not found: ${CHUNKS_DIR}\n`);
-  process.exit(1);
-}
-const launcherCandidates = readdirSync(CHUNKS_DIR).filter((f) => /^launcher-.*\.js$/.test(f));
-if (launcherCandidates.length === 0) {
-  process.stderr.write(`no launcher-*.js found in ${CHUNKS_DIR}\n`);
-  process.exit(1);
-}
-const LAUNCHER = join(CHUNKS_DIR, launcherCandidates[0]);
-const BACKUP = `${LAUNCHER}.unpatched.bak`;
-
-// ============================================================================
-// Step 2: backup
-// ============================================================================
-if (!existsSync(BACKUP)) {
-  copyFileSync(LAUNCHER, BACKUP);
+function sha256(file) {
+  return createHash("sha256").update(readFileSync(file)).digest("hex");
 }
 
-// ============================================================================
-// Step 3: skip if already patched
-// ============================================================================
-// We can't just diff against backup — mcode updates may legitimately change
-// the launcher without changing it back. So we look for the actual patch
-// marker (__mcodeQuotaStart / __mcodeQuotaRender) — if found, assume patched.
-const current = readFileSync(LAUNCHER, "utf-8");
-if (current.includes("__mcodeQuotaStart") && current.includes("__mcodeQuotaRender")) {
-  process.stderr.write(`[mcode-quota] already patched for ${CURRENT_VERSION} (${LAUNCHER})\n`);
-  // Re-write sidecar in case the old one is from before this patcher.
-  const SIDECAR = join(CHUNKS_DIR, "mcode-quota-fetcher-9f8a7b.mjs");
-  writeFileSync(SIDECAR, SIDECAR_BODY, "utf-8");
-  process.exit(0);
+// Returns a directory containing the pristine package contents, or null.
+function ensurePristine() {
+  if (existsSync(TARBALL_PATH)) return extractTarball(TARBALL_PATH);
+  if (OFFLINE) {
+    log(`offline and no cached tarball at ${TARBALL_PATH}; falling back to --src`);
+    return null;
+  }
+  try {
+    mkdirSync(TARBALL_DIR, { recursive: true });
+    log(`downloading ${PKG}@${CURRENT_VERSION} from ${REGISTRY}`);
+    execFileSync("npm", ["pack", `${PKG}@${CURRENT_VERSION}`, "--registry", REGISTRY,
+                          "--pack-destination", TARBALL_DIR],
+                 { stdio: ["ignore", "ignore", "pipe"], encoding: "utf-8", timeout: 300_000 });
+    if (!existsSync(TARBALL_PATH)) {
+      // npm may have written a differently-named file; look for it.
+      const cand = readdirSync(TARBALL_DIR).find((f) => f.endsWith(".tgz"));
+      if (cand) {
+        cpSync(join(TARBALL_DIR, cand), TARBALL_PATH);
+      }
+    }
+    if (!existsSync(TARBALL_PATH)) {
+      log("npm pack produced no tarball; falling back to --src");
+      return null;
+    }
+    log(`cached tarball: ${TARBALL_PATH} (${sha256(TARBALL_PATH).slice(0, 16)}…)`);
+    return extractTarball(TARBALL_PATH);
+  } catch (e) {
+    log(`npm pack failed: ${(e.stderr || e.message || "").toString().slice(0, 300)}`);
+    log("falling back to --src (installed release)");
+    return null;
+  }
+}
+
+function extractTarball(tarballPath) {
+  const outDir = join(FORK_BASE, `.pristine-${CURRENT_VERSION}`);
+  const stamp = outDir + ".stamp";
+  if (existsSync(stamp)) return outDir;
+  rmSync(outDir, { recursive: true, force: true });
+  mkdirSync(outDir, { recursive: true });
+  execFileSync("tar", ["-xzf", tarballPath, "-C", outDir, "--strip-components=1"], { stdio: "pipe" });
+  writeFileSync(stamp, sha256(tarballPath));
+  return outDir;
+}
+
+// Fallback: copy the installed release's code package. Refuse if it looks
+// patched — we must never fork a tampered tree.
+function pristineFromSrc() {
+  if (!SRC) return null;
+  const codeDir = join(SRC, "lib", "node_modules", "@minimax-ai", "code");
+  if (!existsSync(codeDir)) return null;
+  const chunksDir = join(codeDir, "chunks");
+  const launcher = existsSync(chunksDir)
+    ? readdirSync(chunksDir).find((f) => /^launcher-.*\.js$/.test(f))
+    : null;
+  if (!launcher) return null;
+  const body = readFileSync(join(chunksDir, launcher), "utf-8");
+  if (body.includes("__mcodeQuota") || body.includes("__mcodeRuntime")) {
+    log(`REFUSING --src fallback: ${launcher} already contains quota patch`);
+    return null;
+  }
+  return codeDir;
 }
 
 // ============================================================================
-// Step 4: find anchors
+// Fork setup — real copy, no symlinks
 // ============================================================================
-let anchors;
-try {
-  anchors = execFileSync(process.execPath, [FIND_ANCHORS, LAUNCHER], { encoding: "utf-8" });
-} catch (e) {
-  process.stderr.write(`[mcode-quota] anchor finder failed: ${e.stderr ?? e.message}\n`);
-  process.exit(2);
+function setupFork(pristineDir) {
+  log(`initializing fork at ${FORK_DIR}`);
+  rmSync(FORK_CODE, { recursive: true, force: true });
+  mkdirSync(FORK_DIR, { recursive: true });
+  cpSync(pristineDir, FORK_CODE, { recursive: true, dereference: true, force: true });
+  // npm's tarball ships no node_modules; mcode's installed tree has one.
+  // Reuse it read-only by copying (it's small enough and keeps the fork
+  // fully self-contained — no shared inodes with the real install).
+  const srcNodeModules = SRC
+    ? join(SRC, "lib", "node_modules", "@minimax-ai", "code", "node_modules")
+    : null;
+  if (srcNodeModules && existsSync(srcNodeModules) && !existsSync(join(FORK_CODE, "node_modules"))) {
+    try {
+      cpSync(srcNodeModules, join(FORK_CODE, "node_modules"), { recursive: true, force: true });
+    } catch (e) {
+      log(`warning: could not copy node_modules: ${e.message}`);
+    }
+  }
+  writeFileSync(join(FORK_DIR, ".fork-marker"),
+    `${CURRENT_VERSION}\n${pristineDir}\n${existsSync(TARBALL_PATH) ? sha256(TARBALL_PATH) : "no-tarball"}\n`);
 }
-const kv = Object.fromEntries(
-  anchors
-    .split("\n")
-    .filter((l) => l && !l.startsWith("#"))
-    .map((l) => {
+
+// ============================================================================
+// Launcher chunk patch
+// ============================================================================
+function findLauncherChunk() {
+  const chunksDir = join(FORK_CODE, "chunks");
+  if (!existsSync(chunksDir)) return null;
+  const f = readdirSync(chunksDir).find((x) => /^launcher-.*\.js$/.test(x));
+  return f ? join(chunksDir, f) : null;
+}
+
+const LAUNCHER_MARKER = "__mcodeQuotaRender";
+
+// render() override inserted as the last member of the widget class.
+//   - captures runtime + shellState for the sidecar
+//   - stores the widget so the sidecar can call requestRender()
+//   - appends the quota lines returned by the sidecar
+const PATCH_RENDER =
+  `render(e){let r=super.render(e);` +
+  `if(this&&this.runtime)globalThis.__mcodeRuntime=this.runtime;` +
+  `if(this&&this.shellState)globalThis.__mcodeShellState=this.shellState;` +
+  `globalThis.__mcodeQuotaWidget=this;` +
+  `if(Array.isArray(r)){let _qr=typeof globalThis.__mcodeQuotaRender==="function"` +
+  `?globalThis.__mcodeQuotaRender(e):[];if(Array.isArray(_qr)&&_qr.length>0)return[...r,..._qr]}return r}`;
+
+function patchLauncherChunk(launcherPath) {
+  const content = readFileSync(launcherPath, "utf-8");
+  if (content.includes(LAUNCHER_MARKER)) return true;
+
+  let anchors;
+  try {
+    anchors = execFileSync(process.execPath, [FIND_ANCHORS, launcherPath], { encoding: "utf-8" });
+  } catch (e) {
+    log(`anchor finder failed: ${e.stderr ?? e.message}`);
+    return false;
+  }
+  const kv = Object.fromEntries(
+    anchors.split("\n").filter((l) => l && !l.startsWith("#")).map((l) => {
       const m = l.match(/^(\w+)=(.*)$/);
       if (!m) return [null, null];
-      const v = m[2].replace(/^'/, "").replace(/'$/, "").replace(/'\\''/g, "'");
+      let v = m[2];
+      if (v.startsWith("'") && v.endsWith("'")) v = v.slice(1, -1).replace(/'\\''/g, "'");
       return [m[1], v];
-    })
-    .filter(([k]) => k),
-);
-const BASE = kv.BASE;
-const WIDGET = kv.WIDGET;
-const WIDGET_BODY_END = Number(kv.WIDGET_BODY_END);
-const CTOR_END = Number(kv.CTOR_END);
-if (!BASE || !WIDGET || !Number.isFinite(WIDGET_BODY_END) || !Number.isFinite(CTOR_END)) {
-  process.stderr.write(`[mcode-quota] could not parse anchors:\n${anchors}\n`);
-  process.exit(2);
-}
-process.stderr.write(`[mcode-quota] anchors: BASE=${BASE} WIDGET=${WIDGET} CTOR_END=${CTOR_END} WIDGET_BODY_END=${WIDGET_BODY_END}\n`);
-
-// ============================================================================
-// Step 5: splice patches
-// ============================================================================
-//
-// Patch A: insert a `static { ... }` block right after the constructor body
-//   closes. `static { ... }` is the only way to run arbitrary statements at
-//   the class body's top level in ES2022 (it counts as a class field).
-//   The block:
-//     - wraps the prototype's setState to capture the widget's
-//       `this.runtime` and merged `this.shellState` to globalThis on every
-//       setState call. The sidecar reads them to call the runtime API.
-//     - calls __mcodeQuotaStart to kick off the background fetchers
-//       (mmx quota every 60s + session tokens every 10s).
-//
-// Patch B: insert a `render()` method right before the widget class body
-//   closes. It wraps super.render() and appends the sidecar-rendered lines.
-//   Since the widget extends the base status renderer, the inherited
-//   render is called via super.render() and the result is augmented.
-//
-// Two anchors, simpler payloads:
-//
-// PATCH_AFTER_CTOR (now empty — we no longer need the static block).
-// State capture is done inline by the render() wrapper below. The render
-// method is on the widget prototype and runs on every render, so it has
-// a reliable `this` reference to grab `this.runtime` and `this.shellState`.
-//
-// PATCH_BEFORE_CLASS_END: the render() method override. It:
-//   1. Calls super.render(e) to get the base status line(s)
-//   2. Captures runtime + shellState to globalThis (the bridge)
-//   3. Calls globalThis.__mcodeQuotaRender(width) to get extra lines
-//   4. Spreads everything together
-//   The base render IS still called via super.render() (no overwriting).
-//   The new render replaces any prior render method on the class.
-const PATCH_AFTER_CTOR = "";
-
-const PATCH_BEFORE_CLASS_END = `render(e){let r=super.render(e);if(this&&this.runtime)globalThis.__mcodeRuntime=this.runtime;if(this&&this.shellState)globalThis.__mcodeShellState=this.shellState;if(Array.isArray(r)){let _qr=typeof globalThis.__mcodeQuotaRender==="function"?globalThis.__mcodeQuotaRender(e):[];if(Array.isArray(_qr)&&_qr.length>0)return[...r,..._qr]}return r}`;
-
-if (CTOR_END >= WIDGET_BODY_END - 1) {
-  process.stderr.write(`[mcode-quota] CTOR_END (${CTOR_END}) must be < WIDGET_BODY_END - 1 (${WIDGET_BODY_END - 1})\n`);
-  process.exit(2);
-}
-
-// Splice: insert in order. After PATCH_AFTER_CTOR, the WIDGET_BODY_END
-// offset shifts by PATCH_AFTER_CTOR.length, so adjust the second splice.
-const after = current.slice(0, CTOR_END + 1) + PATCH_AFTER_CTOR + current.slice(CTOR_END + 1);
-const newWIDGET_BODY_END = WIDGET_BODY_END + PATCH_AFTER_CTOR.length;
-const finalContent =
-  after.slice(0, newWIDGET_BODY_END) + PATCH_BEFORE_CLASS_END + after.slice(newWIDGET_BODY_END);
-
-// Write and verify.
-writeFileSync(LAUNCHER, finalContent, "utf-8");
-try {
-  execFileSync(process.execPath, ["--check", LAUNCHER], { stdio: "pipe" });
-} catch (e) {
-  copyFileSync(BACKUP, LAUNCHER);
-  process.stderr.write(
-    `[mcode-quota] patched launcher failed node --check; rolled back\n` +
-      `stderr: ${e.stderr?.toString() ?? "(none)"}\n` +
-      `stdout: ${e.stdout?.toString() ?? "(none)"}\n` +
-      `code: ${e.status}\n`,
+    }).filter(([k]) => k),
   );
-  process.exit(2);
+  const WIDGET_BODY_END = Number(kv.WIDGET_BODY_END);
+  const CTOR_END = Number(kv.CTOR_END);
+  if (!Number.isFinite(WIDGET_BODY_END) || !Number.isFinite(CTOR_END)) {
+    log(`anchor parse failed\n${anchors}`);
+    return false;
+  }
+  if (CTOR_END >= WIDGET_BODY_END) {
+    log("invalid CTOR_END vs WIDGET_BODY_END");
+    return false;
+  }
+
+  const patched = content.slice(0, WIDGET_BODY_END) + PATCH_RENDER + content.slice(WIDGET_BODY_END);
+  const tmp = launcherPath + ".tmpcheck.js";
+  writeFileSync(tmp, patched, "utf-8");
+  try {
+    execFileSync(process.execPath, ["--check", tmp], { stdio: "pipe" });
+  } catch (e) {
+    rmSync(tmp, { force: true });
+    log(`patched launcher failed node --check: ${(e.stderr || e.message || "").toString().slice(0, 300)}`);
+    return false;
+  }
+  rmSync(tmp, { force: true });
+  writeFileSync(launcherPath, patched, "utf-8");
+  return true;
 }
 
 // ============================================================================
-// Step 6: write sidecar
+// cli.js patch — import the sidecar directly.
+// This replaces the old NODE_OPTIONS=--import=… approach, which leaked the
+// sidecar into every child process mcode spawned (the process storm).
 // ============================================================================
-const SIDECAR = join(CHUNKS_DIR, "mcode-quota-fetcher-9f8a7b.mjs");
-writeFileSync(SIDECAR, SIDECAR_BODY, "utf-8");
+const CLI_MARKER = "mcode-quota-sidecar";
 
-process.stderr.write(`[mcode-quota] patched launcher for ${CURRENT_VERSION}\n`);
-process.stderr.write(`[mcode-quota] sidecar: ${SIDECAR}\n`);
-process.stderr.write(`\n`);
-process.stderr.write(`Launch mcode with the sidecar preloaded:\n`);
-process.stderr.write(`  NODE_OPTIONS="--import=${SIDECAR}" mcode\n`);
-process.stderr.write(`\n`);
-process.stderr.write(`Or use the wrapper:\n`);
-process.stderr.write(`  mcode-with-quota\n`);
+function patchCliEntry() {
+  const cliPath = join(FORK_CODE, "cli.js");
+  if (!existsSync(cliPath)) {
+    log(`cli.js not found at ${cliPath}`);
+    return false;
+  }
+  let content = readFileSync(cliPath, "utf-8");
+  const importLine = `import ${JSON.stringify(SIDECAR_PATH)}; /* ${CLI_MARKER} */`;
+  if (content.includes(CLI_MARKER)) {
+    if (content.includes(importLine)) return true;
+    // sidecar path changed — strip the old import and re-add
+    content = content.split("\n").filter((l) => !l.includes(CLI_MARKER)).join("\n");
+  }
+  const shebang = content.startsWith("#!") ? content.indexOf("\n") + 1 : 0;
+  const patched = content.slice(0, shebang) + importLine + "\n" + content.slice(shebang);
+  writeFileSync(cliPath, patched, "utf-8");
+  try {
+    execFileSync(process.execPath, ["--check", cliPath], { stdio: "pipe" });
+  } catch (e) {
+    log(`patched cli.js failed node --check: ${(e.stderr || e.message || "").toString().slice(0, 300)}`);
+    return false;
+  }
+  return true;
+}
+
+// ============================================================================
+// Main
+// ============================================================================
+function main() {
+  const markerPath = join(FORK_DIR, ".fork-marker");
+  let forkOk = false;
+  if (existsSync(markerPath) && existsSync(FORK_CODE)) {
+    const marker = readFileSync(markerPath, "utf-8").split("\n");
+    if (marker[0] === CURRENT_VERSION) forkOk = true;
+    else {
+      log("fork version mismatch; re-initializing");
+      rmSync(FORK_DIR, { recursive: true, force: true });
+    }
+  }
+
+  if (!forkOk) {
+    const pristine = ensurePristine() || pristineFromSrc();
+    if (!pristine) {
+      log("no pristine source available (no tarball, no usable --src)");
+      process.exit(1);
+    }
+    setupFork(pristine);
+  }
+
+  const launcher = findLauncherChunk();
+  if (!launcher) {
+    log("no launcher chunk in fork");
+    process.exit(1);
+  }
+  if (!patchLauncherChunk(launcher)) {
+    log("launcher patch failed");
+    process.exit(1);
+  }
+  if (!patchCliEntry()) {
+    log("cli.js patch failed");
+    process.exit(1);
+  }
+
+  const sidecarDir = dirname(SIDECAR_PATH);
+  if (!existsSync(sidecarDir)) mkdirSync(sidecarDir, { recursive: true });
+  writeFileSync(SIDECAR_PATH, SIDECAR_BODY, "utf-8");
+  try {
+    execFileSync(process.execPath, ["--check", SIDECAR_PATH], { stdio: "pipe" });
+  } catch (e) {
+    log(`sidecar failed node --check: ${(e.stderr || e.message || "").toString().slice(0, 400)}`);
+    process.exit(1);
+  }
+
+  log(`fork ready: ${FORK_DIR}`);
+  process.stdout.write(FORK_DIR + "\n");
+}
+
+main();
