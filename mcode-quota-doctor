@@ -122,28 +122,43 @@ if [[ -f "$SIDECAR" ]]; then
         agentSessionId: sid,
         contextUsage: { usedTokens: 42000, contextWindowTokens: 200000 },
       };
-      globalThis.__mcodeQuotaRender(140);
+      globalThis.__mcodeQuotaRender(200);
       await new Promise((r) => setTimeout(r, 6000));
-      process.stdout.write(globalThis.__mcodeQuotaRender(140).join("\n"));
+      // Wide: the breakdown should be there. Narrow: it should be gone to save
+      // room, while 上下文 survives. "@@@" separates the two captures.
+      process.stdout.write(
+        globalThis.__mcodeQuotaRender(200).join("\n") +
+        "\n@@@\n" +
+        globalThis.__mcodeQuotaRender(100).join("\n")
+      );
     ' 2>/dev/null || echo "(live test failed)"
   )"
   CLEAN="$(printf '%s' "$LIVE" | sed -E 's/\x1b\[[0-9;]*[A-Za-z]//g')"
-  if printf '%s' "$CLEAN" | grep -q "5小时使用量" && printf '%s' "$CLEAN" | grep -q "周使用量"; then
-    ok "live render: $(printf '%s' "$CLEAN" | head -1 | cut -c1-100)"
+  WIDE="${CLEAN%%@@@*}"
+  NARROW="${CLEAN##*@@@}"
+  if printf '%s' "$WIDE" | grep -q "5小时使用量" && printf '%s' "$WIDE" | grep -q "周使用量"; then
+    ok "live render: $(printf '%s' "$WIDE" | head -1 | cut -c1-100)"
   else
     warn "live render produced no quota line (mmx may be down). Raw: $(printf '%s' "$CLEAN" | head -c120)"
   fi
-  if printf '%s' "$CLEAN" | grep -q "会话 tokens"; then
-    ok "session tokens line: $(printf '%s' "$CLEAN" | grep -o '会话 tokens[^│]*' | head -1 | cut -c1-60)"
+  if printf '%s' "$WIDE" | grep -q "会话 tokens"; then
+    ok "session tokens line: $(printf '%s' "$WIDE" | grep -o '会话 tokens[^│]*' | head -1 | cut -c1-60)"
   else
     info "session tokens line not present (no session row yet?)"
   fi
-  if printf '%s' "$CLEAN" | grep -q "输入"; then
-    ok "session breakdown kept at 140 cols: $(printf '%s' "$CLEAN" | grep -o '输入 [^)]*' | head -1 | cut -c1-52)"
+  if printf '%s' "$WIDE" | grep -q "输入"; then
+    ok "breakdown shown at 200 cols: $(printf '%s' "$WIDE" | grep -o '输入 [^)]*' | head -1 | cut -c1-52)"
   elif [[ "${MCODE_QUOTA_TAIL:-}" == "compact" ]]; then
-    info "session breakdown omitted (MCODE_QUOTA_TAIL=compact)"
+    info "breakdown omitted (MCODE_QUOTA_TAIL=compact)"
   else
-    warn "session breakdown missing at 140 cols (expected 输入/输出/缓存)"
+    warn "breakdown missing at 200 cols (expected 输入/输出/缓存)"
+  fi
+  if printf '%s' "$NARROW" | grep -q "输入"; then
+    warn "breakdown still shown at 100 cols (should be dropped to free room)"
+  elif [[ "${MCODE_QUOTA_TAIL:-}" == "full" ]]; then
+    info "breakdown kept at 100 cols (MCODE_QUOTA_TAIL=full)"
+  else
+    ok "breakdown dropped at 100 cols, 上下文 kept: $(printf '%s' "$NARROW" | grep -o '会话 tokens[^│]*│ *上下文 [^ ]* [0-9]*%' | head -1 | cut -c1-70)"
   fi
   if printf '%s' "$CLEAN" | grep -q "上下文 42K/200K 21%"; then
     ok "context usage: $(printf '%s' "$CLEAN" | grep -o '上下文 [^ ]* [0-9]*%' | head -1)"

@@ -72,7 +72,7 @@ patcher 失败 → **自动回退到未打 patch 的官方 mcode**，不会卡�
 /home/weekbin/orca/projects/mcode/mcode-quota/mcode-quota-doctor
 ```
 
-期望 `17 ok, 0 warnings, 0 failures`。关键项：
+期望 `18 ok, 0 warnings, 0 failures`。关键项：
 
 ```
 [ok] mcode launcher pristine (no quota hooks)
@@ -80,13 +80,14 @@ patcher 失败 → **自动回退到未打 patch 的官方 mcode**，不会卡�
 [ok] fork launcher render hook present
 [ok] fork cli.js imports sidecar statically
 [ok] mcodex does not use NODE_OPTIONS
-[ok] session breakdown kept at 140 cols
+[ok] breakdown shown at 200 cols
+[ok] breakdown dropped at 100 cols, 上下文 kept
 [ok] context usage: 上下文 42K/200K 21%
 [ok] separator is │ (U+2502)
 [ok] no mmx process storm (concurrent: 0)
 ```
 
-（`MCODE_QUOTA_TAIL=compact` 时「session breakdown」一项会从 ok 降为 info，属预期。）
+（`MCODE_QUOTA_TAIL=compact` / `=full` 时对应的明细项会从 ok 降为 info，属预期。）
 
 ---
 
@@ -219,15 +220,19 @@ const CACHE_TTL_MS = Number(process.env.MCODE_QUOTA_TTL_MS || 60_000);       // 
 const SESSION_TTL_MS = 10_000;                                                // 会话 token 轮询间隔
 const FETCH_TIMEOUT_MS = 20_000;                                              // mmx 单次超时
 const MMX_FAILURE_RESET_MS = Number(process.env.MCODE_QUOTA_MMX_COOLDOWN_MS || 5 * 60_000);  // 熔断冷却
-const TAIL_MODE = String(process.env.MCODE_QUOTA_TAIL || "").toLowerCase() === "compact"
-  ? "compact" : "full";                                                       // 单行是否可丢明细
+const TAIL_MODE = (() => {                                                      // 排版模式
+  const v = String(process.env.MCODE_QUOTA_TAIL || "").toLowerCase();
+  return v === "compact" || v === "full" ? v : "auto";                          // 默认 auto
+})();
 ```
 
 前两个环境变量只为测试而存在（缩短到秒级），生产不要设置。
 `MCODE_QUOTA_TAIL` 是给用户的排版开关：
 
-- 不设置 / `full`（默认）— 单行放不下明细时**宁可换行也保留** `输入/输出/缓存`
-- `compact` — 单行优先，放不下时**丢掉明细**保住一行（v2.1.0 的行为）
+- 不设置 / `auto`（默认）— 响应式：按 **行数 > 进度条宽度 > 明细** 打分，
+  明细只在「不多占一行、不挤瘦进度条」时才显示
+- `full` — 永远保留明细，宁可换行（v2.1.2 的行为）
+- `compact` — 永远不显示明细（v2.1.0 的行为）
 
 ### 7.5 文案
 

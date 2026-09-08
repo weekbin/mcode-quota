@@ -240,13 +240,16 @@ function renderContextChunk() {
 const SEP = "  " + ESC + C_MUTED + "m\\u2502" + RESET_SEQ + "  ";
 const HORIZ_MIN_WIDTH = 110;
 const NARROW_MIN_WIDTH = 80;
-// Whether the single-line layout may drop the 输入/输出/缓存 breakdown to stay on
-// one row. Default "full": keep the breakdown and let the line wrap instead —
-// the numbers are more useful than saving a row. "compact" restores the old
-// one-line-at-any-cost behaviour.
-const TAIL_MODE = String(process.env.MCODE_QUOTA_TAIL || "").toLowerCase() === "compact"
-  ? "compact"
-  : "full";
+// How the 输入/输出/缓存 breakdown trades off against row count.
+//   auto (default) — responsive: drop the breakdown whenever keeping it would
+//                    cost an extra row, keep it on a tie. Narrow terminals then
+//                    spend their width on the bars / 上下文 instead of on detail.
+//   full           — always keep the breakdown, even if it wraps to more rows.
+//   compact        — never show the breakdown.
+const TAIL_MODE = (() => {
+  const v = String(process.env.MCODE_QUOTA_TAIL || "").toLowerCase();
+  return v === "compact" || v === "full" ? v : "auto";
+})();
 
 // Render a single quota line at the widest bar that still fits the width.
 function fit(build, width) {
@@ -279,36 +282,73 @@ globalThis.__mcodeQuotaRender = function (width) {
     const q5 = (bar) => renderOne(L_LABEL_5H, raw.dRem, raw.dReset, bar);
     const qw = (bar) => renderOne(L_LABEL_WEEK, raw.wRem, raw.wReset, bar);
 
-    const narrow = () => {
-      const tail = tailFor(width);
-      if (width >= NARROW_MIN_WIDTH) {
-        lines.push(fit(q5, width));
-        const combined = fit((bar) => qw(bar) + (tail ? SEP + tail : ""), width);
-        if (dw(combined) <= width) {
-          lines.push(combined);
-        } else {
-          // Weekly + tail still do not fit together: split onto 3 lines.
-          lines.push(fit(qw, width));
-          if (tail) lines.push(tail);
-        }
-      } else {
-        lines.push(fit(q5, width));
-        lines.push(fit(qw, width));
-        if (tail) lines.push(tail);
+    // Each layout builder returns the rows it would use, or null when the
+    // layout cannot fit this width at all. They never touch the outer array.
+    const horizRows = (tail) => {
+      const h = fit((bar) => q5h(bar) + SEP + qwh(bar) + (tail ? SEP + tail : ""), width);
+      return dw(h) <= width ? [h] : null;
+    };
+    const narrowRows = (tail) => {
+      if (width < NARROW_MIN_WIDTH) {
+        const out = [fit(q5, width), fit(qw, width)];
+        if (tail) out.push(tail);
+        return out;
       }
+      const out = [fit(q5, width)];
+      const combined = fit((bar) => qw(bar) + (tail ? SEP + tail : ""), width);
+      if (dw(combined) <= width) {
+        out.push(combined);
+      } else {
+        // Weekly + tail still do not fit together: split onto a third row.
+        out.push(fit(qw, width));
+        if (tail) out.push(tail);
+      }
+      return out;
     };
 
-    if (width >= HORIZ_MIN_WIDTH) {
-      // Keep the breakdown whenever the row can hold it; only a "compact" tail
-      // request drops it up front.
-      const tail = TAIL_MODE === "compact" ? buildTail(true) : tailFor(width);
-      const horiz = fit((bar) => q5h(bar) + SEP + qwh(bar) + (tail ? SEP + tail : ""), width);
-      // The context chunk can push the single line past the terminal even at the
-      // minimum bar width — degrade to the narrow layout instead of overflowing.
-      if (dw(horiz) <= width) lines.push(horiz);
-      else narrow();
+    const fullTail = buildTail(false);
+    const compactTail = buildTail(true);
+    // The full tail is only a candidate when it fits on a row by itself.
+    const canFull = dw(fullTail) <= width;
+    const candidates = [];
+    const offer = (rows, detail) => {
+      if (rows && rows.length) candidates.push({ rows, detail });
+    };
+    const offerFull = () => {
+      if (!canFull) return;
+      if (width >= HORIZ_MIN_WIDTH) offer(horizRows(fullTail), true);
+      offer(narrowRows(fullTail), true);
+    };
+    const offerCompact = () => {
+      if (width >= HORIZ_MIN_WIDTH) offer(horizRows(compactTail), false);
+      offer(narrowRows(compactTail), false);
+    };
+    if (TAIL_MODE === "auto") {
+      offerFull();
+      offerCompact();
+    } else if (TAIL_MODE === "full") {
+      offerFull();
     } else {
-      narrow();
+      offerCompact();
+    }
+    if (candidates.length) {
+      // Responsive rule, in order: fewest rows, then widest progress bar, then
+      // the breakdown. So a narrow terminal gives up the detail before it gives
+      // up a row or a readable bar, and the detail only appears once it costs
+      // neither. 会话 tokens / 上下文 are never dropped.
+      const barWidth = (rows) => {
+        const m = String(rows[0] || "").replace(ANSI_RE, "").match(/[█░]+/);
+        return m ? m[0].length : 0;
+      };
+      candidates.sort((a, b) =>
+        a.rows.length - b.rows.length ||
+        barWidth(b.rows) - barWidth(a.rows) ||
+        (b.detail ? 1 : 0) - (a.detail ? 1 : 0));
+      lines.push(...candidates[0].rows);
+    } else {
+      const tail = tailFor(width);
+      lines.push(fit(q5, width), fit(qw, width));
+      if (tail) lines.push(tail);
     }
   } else {
     const tail = tailFor(width);
