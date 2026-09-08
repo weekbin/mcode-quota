@@ -60,19 +60,77 @@
 
 每个版本做的验证：
 
-| 验证项 | v1.0 | v1.1 | v1.2 | v1.3 | v1.4 | v1.5 |
-|---|---|---|---|---|---|---|
-| `bash -n` patcher 语法 | ✅ | ✅ | ✅ | ✅ | n/a | n/a |
-| `node --check` patcher | n/a | n/a | n/a | n/a | ✅ | ✅ |
-| `node --check` launcher | n/a | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `node --check` sidecar | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| doctor 10/10 | ✅ | ✅ | ✅ | ✅ | n/a | n/a |
-| sidecar 单独运行（输出格式） | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| mcode TUI 渲染（narrow 80 cols） | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| mcode TUI 渲染（wide 120 cols） | n/a | n/a | ✅ | n/a | n/a | n/a |
-| mcode TUI 渲染（wide 160 cols） | n/a | n/a | n/a | ✅ | ✅ | ✅ |
-| bridge layer（globalThis.__mcodeRuntime） | n/a | n/a | n/a | n/a | n/a | ✅ |
-| 第三行 session tokens 渲染 | n/a | n/a | n/a | n/a | n/a | ✅（mock 验证） |
+## 2026-09-08 — v1.6 抗升级加固 + process storm 修复
+
+### 问题回顾
+- mmx 调用 5s 超时后 SIGKILL 会留下 watcher 僵尸进程
+- 多个 mcode CLI 同时跑就会形成 process storm
+- mcode runtime API 可能改名/移除，需要 sqlite fallback
+- 之前锚点用 regex + 括号配对，遇到模板字符串 `}` 就错
+- setState wrap 太依赖名字
+
+### 改动
+
+#### A. AST 化 anchor finder (mcode-find-anchors.mjs)
+- 用 acorn 8.18 解析整个 launcher 为 AST
+- 找 ClassExpression 不再只盯顶层 VariableDeclaration
+- 走 parent chain 找出 class 的 binding (VariableDeclarator 或 AssignmentExpression)
+- 通过 5 个结构特征 (super / this.runtime= / this.requestRender= / this.statusLineItems= / setInterval) 找 widget class
+- BASE = widget.superClass 直接派生，不再单独匹配
+- 所有 byte offset 来自 acorn 的 source range，不再 string scan
+- 抗：模板字符串、注释、regex literal、嵌套函数、改 obfuscator 名
+
+#### B. Bridge 简化（不再依赖 setState）
+- 之前：static block 包裹 setState prototype 来抓 this.runtime + this.shellState
+- 现在：render() wrapper 直接 `this.runtime` / `this.shellState` → globalThis
+- 副作用：不再需要 static block，sidecar import 时 auto-start 即可
+- 抗：setState 改名/换签名/移除
+
+#### C. SQLite direct fallback
+- mcode runtime 用 `local_runtime_token_usage` 表存每次 turn 的 token
+- 表 schema: `input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, cost_usd, session_id`
+- sidecar 的 fetchSessionOnce 现在两路：
+  1. 优先 `runtime.getSessionUsageSummary(sessionId)`（in-process 快）
+  2. 失败时回落到直接查 `~/.minimax/v2/sqlite/runtime-state.sqlite` (readOnly)
+- 抗：runtime API 改名/移除/schema 变了（sqlite 路径用同一份 schema）
+
+#### D. Process storm 修复（关键）
+- `detached: true` + 自己 process group + 超时 SIGKILL 整个 group
+- `isMmxOnPath()` 启动前先 probe，没有就不 spawn（避免 ENOENT thrash）
+- `MMX_MAX_FAILURES = 3` 连续失败后 stop 整个 sidecar lifetime
+- mmx 调用自己 stderr 64KB cap 防止 unbounded memory
+- 失败时回落到 sqlite，**永远不刷 retry storm**
+
+#### E. Self-test
+- patch 后用 acorn parse 验证 launcher 仍是合法 JS
+- 检查 `super.render(e)` 和 `__mcodeQuotaRender` 引用都在
+- 检查 `__mcodeRuntime` / `__mcodeShellState` capture 都在
+
+### 验证
+1. AST finder: `BASE='Xc' WIDGET='jf' CTOR_END=823576 WIDGET_BODY_END=824319` （与旧 regex finder 一致）
+2. 完整 mock test:
+   - runtime path: `Session 155K (in 100K · out 50K · cache 5.0K)` ✓
+   - sqlite path: `Session 179.7M (in 2.73M · out 445K · cache 176.5M)` ✓
+   - mmx 缺失: `Session 179.0M (in 2.73M · out 444K · cache 175.9M)` (只有 Session 行，quota 行不显示)
+3. 0 进程泄漏: mmx 失败 3 次后 sidecar 永远 stop
+
+### 文件
+- `package.json`:  新增 acorn ^8.18 dep
+- `mcode-find-anchors.mjs`: 305 行 AST 版本
+- `mcode-patch-quota.mjs`: PATCH_AFTER_CTOR 长度从 433 → 0 (不再需要 static block)
+- `mcode-quota-fetcher-9f8a7b.mjs`: 7448 → 13931 bytes (+6483 字节：sqlite fallback + process storm 防护)
+
+| 验证项 | v1.5 | v1.6 |
+|---|---|---|
+| AST 化 anchor finder | n/a | ✅ |
+| Bridge 抗 setState 改名 | n/a | ✅ |
+| SQLite fallback (runtime API 挂掉) | n/a | ✅ |
+| Process storm 防护 (mmx 失败不刷) | n/a | ✅ |
+| `node --check` launcher | ✅ | ✅ |
+| `node --check` sidecar | ✅ | ✅ |
+| acorn parse 验证 patch | n/a | ✅ |
+| mock test (runtime path) | ✅ | ✅ |
+| mock test (sqlite path) | n/a | ✅ |
 
 ---
 

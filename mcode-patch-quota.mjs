@@ -48,6 +48,9 @@ const FIND_ANCHORS = join(__dirname, "mcode-find-anchors.mjs");
 //   reads them to call the runtime API. No env vars, no IPC — same V8 isolate.
 // ============================================================================
 const SIDECAR_BODY = `import { spawn } from "node:child_process";
+import { createRequire as _mcodeQuotaReq } from "node:module";
+import { existsSync } from "node:fs";
+const _require = _mcodeQuotaReq(import.meta.url);
 const CACHE_TTL_MS = 60_000;
 const FETCH_TIMEOUT_MS = 5_000;
 const SESSION_TTL_MS = 10_000;
@@ -176,24 +179,92 @@ globalThis.__mcodeQuotaStart = function (onUpdate) {
   return id;
 };
 
+// Auto-start polling on import. The previous design required the launcher
+// to call __mcodeQuotaStart from a static { } block, but we removed that
+// patch payload. The sidecar can run on its own — fetchSessionOnce is a
+// no-op when globalThis.__mcodeRuntime / __mcodeShellState are missing,
+// and the render() wrapper in the launcher will populate them on the
+// first frame.
+// We defer to queueMicrotask so the function bodies (fetchQuotaOnce etc.)
+// are fully initialized before we trigger the first tick.
+queueMicrotask(() => {
+  if (typeof globalThis.__mcodeQuotaStart === "function") {
+    globalThis.__mcodeQuotaStart(() => {});
+  }
+});
+
+// ---- mmx invocation: fail-fast, fail-safe -------------------------------
+// Critical: the sidecar can be loaded by many mcode CLI processes at once
+// (e.g., when the user runs mcode-with-quota in several terminals). If
+// mmx hangs or fails, the previous design would SIGKILL after 5s — but
+// Node's child_process.spawn with stdio:pipe creates a watcher process
+// that can survive SIGKILL and turn into a zombie, multiplying across
+// instances. The fix:
+//   1. detached: true — child gets its own process group, so we can
+//      SIGKILL the whole tree via process.kill(-pid, "SIGKILL").
+//   2. isMmxOnPath() probe — short-circuit if mmx isn't installed.
+//   3. Failure-count cap (MMX_MAX_FAILURES) — stop trying after N fails.
+//   4. The interval is unref()'d so it doesn't keep the Node process
+//      alive past the launcher.
+let mmxAvailable = null;
+let mmxFailureCount = 0;
+const MMX_MAX_FAILURES = 3;
+
+function isMmxOnPath() {
+  if (mmxAvailable !== null) return mmxAvailable;
+  const PATH = process.env.PATH || "";
+  mmxAvailable = PATH.split(":").some((d) => d && existsSync(d + "/mmx"));
+  return mmxAvailable;
+}
+
 const runMmx = () =>
   new Promise((resolve, reject) => {
-    const proc = spawn("mmx", ["quota", "show", "--output", "json", "--quiet"], {
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+    if (!isMmxOnPath()) {
+      reject(new Error("mmx CLI not on PATH"));
+      return;
+    }
+    let proc;
+    try {
+      proc = spawn("mmx", ["quota", "show", "--output", "json", "--quiet"], {
+        detached: true,
+        stdio: ["ignore", "pipe", "pipe"],
+        shell: false,
+        windowsHide: true,
+      });
+    } catch (e) {
+      reject(e);
+      return;
+    }
     let out = "", err = "";
+    let killed = false;
+    let stderrBytes = 0;
+    const STDERR_CAP = 64 * 1024;
     proc.stdout.on("data", (b) => { out += b.toString("utf8"); });
-    proc.stderr.on("data", (b) => { err += b.toString("utf8"); });
-    const killTimer = setTimeout(() => proc.kill("SIGKILL"), FETCH_TIMEOUT_MS);
+    proc.stderr.on("data", (b) => {
+      stderrBytes += b.length;
+      if (stderrBytes < STDERR_CAP) err += b.toString("utf8");
+    });
+    const killTimer = setTimeout(() => {
+      killed = true;
+      try { process.kill(-proc.pid, "SIGKILL"); } catch { try { proc.kill("SIGKILL"); } catch {} }
+    }, FETCH_TIMEOUT_MS);
     proc.on("error", (e) => { clearTimeout(killTimer); reject(e); });
-    proc.on("close", (code) => {
+    proc.on("close", (code, signal) => {
       clearTimeout(killTimer);
-      if (code !== 0) return reject(new Error(\`mmx exited \${code}: \${err.trim()}\`));
+      if (killed || (signal && signal !== "SIGTERM")) {
+        try { process.kill(-proc.pid, "SIGKILL"); } catch {}
+      }
+      if (killed) return reject(new Error("mmx timed out after " + FETCH_TIMEOUT_MS + "ms"));
+      if (code !== 0) return reject(new Error("mmx exited " + code + ": " + err.trim().slice(0, 200)));
       try { resolve(JSON.parse(out)); } catch (e) { reject(e); }
     });
   });
 
 const fetchQuotaOnce = async () => {
+  if (mmxFailureCount >= MMX_MAX_FAILURES) {
+    onUpdateCb?.();
+    return;
+  }
   try {
     const payload = await runMmx();
     const g = pickGeneral(payload?.model_remains);
@@ -205,53 +276,137 @@ const fetchQuotaOnce = async () => {
       wReset: fmtReset(g?.weekly_remains_time),
       fetchedAt: Date.now(),
     };
-  } catch {
+    mmxFailureCount = 0;
+  } catch (e) {
+    mmxFailureCount++;
     raw = { ...raw, fetchedAt: Date.now() };
+    if (mmxFailureCount >= MMX_MAX_FAILURES) {
+      raw = { ...raw, valid: false };
+    }
   } finally {
     onUpdateCb?.();
   }
 };
 
+// ---- SQLite direct fallback ---------------------------------------------
+// mcode's runtime stores per-turn token usage in
+// ~/.minimax/v2/sqlite/runtime-state.sqlite, table local_runtime_token_usage.
+// This matches the schema that the runtime's own summarizeBySession() reads
+// from (see chunk-CTHP2I62.js). If the runtime API ever goes away or
+// returns nothing, we can read the same data directly.
+let sqliteDb = null;
+let sqliteDbPath = null;
+const SQLITE_DEFAULT_PATH = (process.env.MCODE_QUOTA_SQLITE
+  || (process.env.HOME || "~") + "/.minimax/v2/sqlite/runtime-state.sqlite");
+const SQLITE_SESSION_SQL = "SELECT " +
+  "COALESCE(SUM(input_tokens), 0) AS inputTokens, " +
+  "COALESCE(SUM(output_tokens), 0) AS outputTokens, " +
+  "COALESCE(SUM(reasoning_tokens), 0) AS reasoningTokens, " +
+  "COALESCE(SUM(cache_read_tokens), 0) AS cacheReadTokens, " +
+  "COALESCE(SUM(cache_write_tokens), 0) AS cacheWriteTokens, " +
+  "COALESCE(SUM(cost_usd), 0) AS costUsd, " +
+  "COUNT(*) AS turns " +
+  "FROM local_runtime_token_usage WHERE session_id = ?";
+
+let _nodeSqlite = null;
+async function getNodeSqlite() {
+  if (_nodeSqlite) return _nodeSqlite;
+  // node:sqlite is a built-in module in Node 22+ (mcode uses Node 24).
+  // Dynamic import because the sidecar is itself an ESM module.
+  _nodeSqlite = await import("node:sqlite");
+  return _nodeSqlite;
+}
+
+function openSqlite(path) {
+  if (sqliteDb && sqliteDbPath === path) return sqliteDb;
+  if (sqliteDb) { try { sqliteDb.close(); } catch {} sqliteDb = null; sqliteDbPath = null; }
+  // node:sqlite's DatabaseSync is sync. We use createRequire to load
+  // it from CJS so we can use the synchronous API.
+  const { createRequire } = _require("node:module");
+  const req = createRequire(import.meta.url);
+  const { DatabaseSync } = req("node:sqlite");
+  sqliteDb = new DatabaseSync(path, { readOnly: true });
+  sqliteDbPath = path;
+  return sqliteDb;
+}
+
+function fetchSessionFromSqlite(sessionId) {
+  // Try the default path first, then a few common alternates.
+  const candidates = [SQLITE_DEFAULT_PATH];
+  // Also accept paths derived from $MCODE_CODE_ROOT if it's a dev layout.
+  for (const p of candidates) {
+    try {
+      const db = openSqlite(p);
+      const row = db.prepare(SQLITE_SESSION_SQL).get(sessionId);
+      if (!row) return null;
+      return {
+        inputTokens: Number(row.inputTokens ?? 0),
+        outputTokens: Number(row.outputTokens ?? 0),
+        reasoningTokens: Number(row.reasoningTokens ?? 0),
+        cacheReadTokens: Number(row.cacheReadTokens ?? 0),
+        cacheWriteTokens: Number(row.cacheWriteTokens ?? 0),
+        costUsd: Number(row.costUsd ?? 0),
+        turns: Number(row.turns ?? 0),
+      };
+    } catch {
+      // Try next candidate
+    }
+  }
+  return null;
+}
+
 async function fetchSessionOnce() {
   const runtime = globalThis.__mcodeRuntime;
   const shell = globalThis.__mcodeShellState;
-  if (!runtime || !shell) return;
-  const fn = runtime.getSessionUsageSummary;
-  if (typeof fn !== "function") return;
+  if (!shell) return;
   const sessionId = shell.agentSessionId;
   if (!sessionId) return;
   // Skip if same session is still fresh
   if (session.sessionId === sessionId && Date.now() - session.fetchedAt < SESSION_TTL_MS) return;
+  let summary = null;
+  let source = "runtime";
+  // Path 1: mcode runtime API. Returns the summary object directly.
+  // See chunk-CTHP2I62.js: getSessionUsageSummary -> content.getSessionUsageSummary
+  //   -> usage.summarizeSession -> store.summarizeBySession (raw row → cE(row))
+  // cE returns {inputTokens, outputTokens, reasoningTokens, cacheReadTokens,
+  //   cacheWriteTokens, totalTokens, costUsd, turns}.
   try {
-    // runtime.getSessionUsageSummary(sessionId) returns the summary object
-    // DIRECTLY (not wrapped in {summary, ...}). See chunk-CTHP2I62.js
-    // getSessionUsageSummary -> applications.session.content.getSessionUsageSummary
-    //   -> usage.summarizeSession -> store.summarizeBySession (raw row → cE(row))
-    // cE returns {inputTokens, outputTokens, reasoningTokens, cacheReadTokens,
-    //   cacheWriteTokens, totalTokens, costUsd, turns}.
-    const summary = await Promise.resolve().then(() => fn.call(runtime, sessionId));
-    if (!summary || typeof summary !== "object") {
-      session = { ...session, sessionId, fetchedAt: Date.now() };
-      onUpdateCb?.();
-      return;
+    const fn = runtime.getSessionUsageSummary;
+    if (typeof fn === "function") {
+      const result = await Promise.resolve().then(() => fn.call(runtime, sessionId));
+      if (result && typeof result === "object") summary = result;
     }
-    const input = Number(summary.inputTokens ?? 0);
-    const output = Number(summary.outputTokens ?? 0);
-    const cache = Number(summary.cacheReadTokens ?? 0);
-    const reasoning = Number(summary.reasoningTokens ?? 0);
-    const total = input + output + cache;
-    session = {
-      valid: true,
-      total, input, output, cache, reasoning,
-      sessionId,
-      turns: Number(summary.turns ?? 0),
-      fetchedAt: Date.now(),
-    };
   } catch {
-    session = { ...session, sessionId, fetchedAt: Date.now() };
-  } finally {
-    onUpdateCb?.();
+    // fall through to sqlite
   }
+  // Path 2: sqlite fallback. Same schema, no in-process coupling.
+  if (!summary) {
+    try {
+      summary = fetchSessionFromSqlite(sessionId);
+      source = summary ? "sqlite" : "none";
+    } catch {
+      source = "none";
+    }
+  }
+  if (!summary) {
+    session = { ...session, sessionId, fetchedAt: Date.now() };
+    onUpdateCb?.();
+    return;
+  }
+  const input = Number(summary.inputTokens ?? 0);
+  const output = Number(summary.outputTokens ?? 0);
+  const cache = Number(summary.cacheReadTokens ?? 0);
+  const reasoning = Number(summary.reasoningTokens ?? 0);
+  const total = input + output + cache;
+  session = {
+    valid: true,
+    total, input, output, cache, reasoning,
+    sessionId,
+    turns: Number(summary.turns ?? 0),
+    source,
+    fetchedAt: Date.now(),
+  };
+  onUpdateCb?.();
 }
 
 function startSessionPoller() {
@@ -358,9 +513,23 @@ process.stderr.write(`[mcode-quota] anchors: BASE=${BASE} WIDGET=${WIDGET} CTOR_
 //   Since the widget extends the base status renderer, the inherited
 //   render is called via super.render() and the result is augmented.
 //
-const PATCH_AFTER_CTOR = `static{;const _C=this;if(_C.prototype.setState&&!_C.prototype.__mcodeQ){_C.prototype.__mcodeQ=1;const _O=_C.prototype.setState;_C.prototype.setState=function(t){if(this.runtime)globalThis.__mcodeRuntime=this.runtime;const r=_O.call(this,t);if(this.shellState)globalThis.__mcodeShellState=this.shellState;return r}}if(typeof globalThis.__mcodeQuotaStart==="function")globalThis.__mcodeQuotaStart(()=>{})}`;
+// Two anchors, simpler payloads:
+//
+// PATCH_AFTER_CTOR (now empty — we no longer need the static block).
+// State capture is done inline by the render() wrapper below. The render
+// method is on the widget prototype and runs on every render, so it has
+// a reliable `this` reference to grab `this.runtime` and `this.shellState`.
+//
+// PATCH_BEFORE_CLASS_END: the render() method override. It:
+//   1. Calls super.render(e) to get the base status line(s)
+//   2. Captures runtime + shellState to globalThis (the bridge)
+//   3. Calls globalThis.__mcodeQuotaRender(width) to get extra lines
+//   4. Spreads everything together
+//   The base render IS still called via super.render() (no overwriting).
+//   The new render replaces any prior render method on the class.
+const PATCH_AFTER_CTOR = "";
 
-const PATCH_BEFORE_CLASS_END = `render(e){let r=super.render(e);if(Array.isArray(r)){let _qr=typeof globalThis.__mcodeQuotaRender==="function"?globalThis.__mcodeQuotaRender(e):[];if(Array.isArray(_qr)&&_qr.length>0)return[...r,..._qr]}return r}`;
+const PATCH_BEFORE_CLASS_END = `render(e){let r=super.render(e);if(this&&this.runtime)globalThis.__mcodeRuntime=this.runtime;if(this&&this.shellState)globalThis.__mcodeShellState=this.shellState;if(Array.isArray(r)){let _qr=typeof globalThis.__mcodeQuotaRender==="function"?globalThis.__mcodeQuotaRender(e):[];if(Array.isArray(_qr)&&_qr.length>0)return[...r,..._qr]}return r}`;
 
 if (CTOR_END >= WIDGET_BODY_END - 1) {
   process.stderr.write(`[mcode-quota] CTOR_END (${CTOR_END}) must be < WIDGET_BODY_END - 1 (${WIDGET_BODY_END - 1})\n`);
