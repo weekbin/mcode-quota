@@ -140,9 +140,11 @@ __mcodeQuotaRender(width) → 按宽度排版 → Ink 写 stdout
 const cu = globalThis.__mcodeShellState?.contextUsage;   // { usedTokens, contextWindowTokens }
 const win = cu.contextWindowTokens || shellState.contextWindowTokens;
 pct = Math.round(Math.min(cu.usedTokens, win) / win * 100);   // 已用占比
+// 渲染为：上下文 <已用>/<总量> <pct>%，例如 上下文 42K/200K 21%
 ```
 
 - 数据与 mcode 原生 `Context N% left` 指示器同源，渲染时实时读取，无需额外轮询
+- 同时给出**已用/总量**与**已用百分比**：百分比用于判断距离压缩还有多远，绝对量用于判断真实余量
 - 阈值对齐 mcode（其按"剩余"判定 10% / 25%），这里取补数：≥75% 暗橙、≥90% 暗红
 - 快照缺失（新会话尚未产生 contextSnapshot）时该字段整块不渲染，不影响其他行
 

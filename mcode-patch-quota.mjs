@@ -187,10 +187,13 @@ function renderOne(text, rem, reset, barWidth) {
   return label(text) + " [" + barSeq + "] " + pctSeq + tail;
 }
 
+// Trim trailing zeros so 1.00M reads as 1M and 1.50M as 1.5M.
+const trimNum = (s) => s.replace(/\\.0+$/, "").replace(/(\\.\\d*[1-9])0+$/, "$1");
+
 const fmtTok = (n) => {
   if (!Number.isFinite(n)) return "0";
-  if (n >= 1_000_000) return (n / 1_000_000).toFixed(n >= 10_000_000 ? 1 : 2) + "M";
-  if (n >= 1_000) return (n / 1_000).toFixed(n >= 10_000 ? 0 : 1) + "K";
+  if (n >= 1_000_000) return trimNum((n / 1_000_000).toFixed(n >= 10_000_000 ? 1 : 2)) + "M";
+  if (n >= 1_000) return trimNum((n / 1_000).toFixed(n >= 10_000 ? 0 : 1)) + "K";
   return String(n);
 };
 
@@ -229,7 +232,9 @@ function renderContextChunk() {
   // Mirrors mcode's own "Context N% left" thresholds, inverted to used-percent:
   // warn at 75% used, error at 90% used (25% / 10% left).
   const col = c.pct >= 90 ? C_ERROR : c.pct >= 75 ? C_WARNING : C_SUCCESS;
-  return label(L_CONTEXT) + " " + ESC + col + "m" + c.pct + "%" + RESET_SEQ;
+  // Show the real numbers next to the percentage: "上下文 42K/200K 21%".
+  const amount = muted(fmtTok(c.used) + "/" + fmtTok(c.window));
+  return label(L_CONTEXT) + " " + amount + " " + ESC + col + "m" + c.pct + "%" + RESET_SEQ;
 }
 
 const SEP = "  " + ESC + C_MUTED + "m\\u2502" + RESET_SEQ + "  ";

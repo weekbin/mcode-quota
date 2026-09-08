@@ -138,10 +138,10 @@ if [[ -f "$SIDECAR" ]]; then
   else
     info "session tokens line not present (no session row yet?)"
   fi
-  if printf '%s' "$CLEAN" | grep -q "上下文 21%"; then
-    ok "context usage line: $(printf '%s' "$CLEAN" | grep -o '上下文 [0-9]*%' | head -1)"
+  if printf '%s' "$CLEAN" | grep -q "上下文 42K/200K 21%"; then
+    ok "context usage: $(printf '%s' "$CLEAN" | grep -o '上下文 [^ ]* [0-9]*%' | head -1)"
   else
-    warn "context usage chunk missing (expected 上下文 21%)"
+    warn "context usage chunk missing (expected 上下文 42K/200K 21%)"
   fi
   if printf '%s' "$CLEAN" | grep -q "│"; then
     ok "separator is │ (U+2502)"
