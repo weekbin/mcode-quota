@@ -2,29 +2,31 @@
 // mcode-find-anchors.mjs
 //
 // Find structural anchors in mcode's launcher bundle for the quota patch.
-// All output is short-name-agnostic — the obfuscator can rename anything.
+// Uses acorn for full AST parsing — robust to template literals, comments,
+// nested functions, and any obfuscator rename. Walks the entire AST (not
+// just top-level statements) because the mcode launcher often defines
+// classes inside comma expressions like `},Xc=class{...}` or as nested
+// class expressions.
 //
-// Output (shell-eval-able):
-//   BASE=<base class short name>
+// Output (shell-eval-able key=value):
+//   BASE=<base class short name>   (or "external" if superClass not in this chunk)
 //   WIDGET=<widget class short name>
-//   WIDGET_BODY_START=<byte offset, right after the opening `{` of widget class body>
-//   WIDGET_BODY_END=<byte offset, position of the closing `}` of widget class body>
-//   CTOR_END=<byte offset, position of the closing `}` of widget class constructor>
+//   RENDER_METHOD_END=<byte offset of the `}` of the widget class render method>
+//   WIDGET_BODY_END=<byte offset of the closing `}` of widget class body>
+//   CTOR_END=<byte offset of the closing `}` of widget class constructor>
 //
-// Strategy:
-//   1. Find every "Name = class [extends Base] {" position.
-//   2. For each, brace-count to find the body.
-//   3. BASE: has a render(<param>) method whose body contains ["", <expr>].
-//   4. WIDGET: extends BASE, has 5 state-init features:
-//        super(...)
-//        this.runtime = ...
-//        this.requestRender = ...
-//        this.statusLineItems = ...
-//        setInterval(...)
-//   5. Locate the END of widget class constructor by matching braces from the
-//      start of `constructor(...)` keyword to its matching `}`. The character
-//      right after this `}` is the natural insertion point for the start hook.
+// Algorithm (WIDGET-first, BASE derived):
+//   1. Parse the entire launcher with acorn → AST
+//   2. Walk all nodes. For each ClassExpression, walk up the parent chain
+//      to discover its binding (VariableDeclarator or AssignmentExpression).
+//   3. Find the WIDGET: a class with 5 distinguishing state-init features
+//      (super() call, this.runtime=, this.requestRender=, this.statusLineItems=,
+//      setInterval). All structurally checked.
+//   4. BASE = widget.superClass (the bound class extends something).
+//      If BASE is not in this chunk (it's imported from another), report
+//      "external" and the WIDGET alone is enough for the patch.
 
+import { parse } from "acorn";
 import { readFileSync } from "node:fs";
 
 const launcherPath = process.argv[2];
@@ -34,81 +36,146 @@ if (!launcherPath) {
 }
 const content = readFileSync(launcherPath, "utf-8");
 
-// Find all "Name = class [extends Base] {" positions.
-const classRe = /(\w+)\s*=\s*class(?:\s+extends\s+(\w+))?\s*\{/g;
-const classes = [];
-let m;
-while ((m = classRe.exec(content)) !== null) {
-  const shortName = m[1];
-  const baseName = m[2] || null;
-  const bodyStart = m.index + m[0].length; // right after `{`
-  // Brace counting to find matching `}` for this class body.
-  let depth = 1;
-  let i = bodyStart;
-  while (i < content.length && depth > 0) {
-    const c = content[i];
-    if (c === "{") depth++;
-    else if (c === "}") depth--;
-    i++;
-  }
-  const bodyEnd = i - 1; // position of the matching `}` of class body
-  classes.push({ shortName, baseName, bodyStart, bodyEnd, body: content.slice(bodyStart, bodyEnd) });
+let ast;
+try {
+  ast = parse(content, {
+    ecmaVersion: "latest",
+    sourceType: "script",
+    allowReturnOutsideFunction: true,
+    allowImportExportEverywhere: true,
+    allowAwaitOutsideFunction: true,
+    allowSuperOutsideMethod: true,
+    ranges: true,
+  });
+} catch (e) {
+  process.stderr.write(`[mcode-find-anchors] parse failed: ${e.message}\n`);
+  process.exit(2);
 }
+
+// ---- Build parent map (depth-first traversal) ---------------------------
+const parentMap = new WeakMap();
+(function walk(node) {
+  if (!node || typeof node !== "object" || !node.type) return;
+  for (const key of Object.keys(node)) {
+    if (key === "loc" || key === "start" || key === "end" || key === "parent") continue;
+    const val = node[key];
+    if (Array.isArray(val)) {
+      for (const v of val) {
+        if (v && typeof v === "object" && v.type) {
+          parentMap.set(v, node);
+          walk(v);
+        }
+      }
+    } else if (val && typeof val === "object" && val.type) {
+      parentMap.set(val, node);
+      walk(val);
+    }
+  }
+})(ast);
+
+// ---- Discover class expressions and their bindings ----------------------
+function discoverClassNames() {
+  const out = [];
+  function visit(node) {
+    if (!node || typeof node !== "object" || !node.type) return;
+    if (node.type === "ClassExpression") {
+      const binding = findBinding(node);
+      if (binding) out.push(binding);
+    }
+    for (const key of Object.keys(node)) {
+      if (key === "loc" || key === "start" || key === "end" || key === "parent") continue;
+      const val = node[key];
+      if (Array.isArray(val)) {
+        for (const v of val) if (v && typeof v === "object" && v.type) visit(v);
+      } else if (val && typeof val === "object" && val.type) {
+        visit(val);
+      }
+    }
+  }
+  visit(ast);
+  return out;
+}
+function findBinding(classNode) {
+  let cur = classNode;
+  while (cur) {
+    const parent = parentMap.get(cur);
+    if (!parent) break;
+    if (parent.type === "VariableDeclarator" && parent.init === cur && parent.id && parent.id.type === "Identifier") {
+      return makeBinding(parent.id.name, classNode);
+    }
+    if (parent.type === "AssignmentExpression" && parent.right === cur && parent.left.type === "Identifier") {
+      return makeBinding(parent.left.name, classNode);
+    }
+    cur = parent;
+  }
+  return null;
+}
+function makeBinding(name, classNode) {
+  const out = {
+    name,
+    superClassName: classNode.superClass && classNode.superClass.type === "Identifier" ? classNode.superClass.name : null,
+    classNode,
+    renderMethod: null,
+    ctorMethod: null,
+  };
+  for (const m of classNode.body.body) {
+    if (m.type !== "MethodDefinition") continue;
+    if (m.key && m.key.type === "Identifier") {
+      if (m.key.name === "render") out.renderMethod = m;
+      if (m.kind === "constructor") out.ctorMethod = m;
+    }
+  }
+  return out;
+}
+
+const classes = discoverClassNames();
 if (classes.length === 0) {
   process.stderr.write("ERROR: no ClassExpression found in launcher\n");
   process.exit(2);
 }
 
-// --- Find BASE class -----------------------------------------------------
-let base = null;
-for (const c of classes) {
-  // Look for a render(<param>) { ... } method.
-  const renderMatch = c.body.match(/\brender\s*\(\s*\w+\s*\)\s*\{/);
-  if (!renderMatch) continue;
-  const renderStart = renderMatch.index + renderMatch[0].length;
-  let depth = 1;
-  let j = renderStart;
-  while (j < c.body.length && depth > 0) {
-    if (c.body[j] === "{") depth++;
-    else if (c.body[j] === "}") depth--;
-    j++;
-  }
-  const renderBody = c.body.slice(renderStart, j - 1);
-  // Distinctive pattern:  ["", <something>]  (empty row + content row).
-  if (/\[\s*""\s*,\s*\w+\s*\]/.test(renderBody)) {
-    base = c;
-    break;
-  }
-}
-if (!base) {
-  process.stderr.write(
-    "ERROR: could not find base class — no class has a render() method\n" +
-      "  returning ['<empty string>', <expr>] (the mcode status bar layout)\n",
-  );
-  process.exit(2);
-}
-
-// --- Find WIDGET class ----------------------------------------------------
-let widget = null;
-for (const c of classes) {
-  if (c.baseName !== base.shortName) continue;
-  const checks = [
-    [/\bsuper\s*\(/, "super(...) call"],
-    [/this\.runtime\s*=/, "this.runtime assignment"],
-    [/this\.requestRender\s*=/, "this.requestRender assignment"],
-    [/this\.statusLineItems\s*=/, "this.statusLineItems assignment"],
-    [/\bsetInterval\s*\(/, "setInterval(...) call"],
-  ];
-  for (const [, label] of checks) {
-    if (!checks[0][0].test(c.body)) {
-      // not actually a failure path; we break on missing feature below
+// ---- Find WIDGET: 5 state-init features --------------------------------
+function nodeHas(node, predicate) {
+  if (!node || typeof node !== "object") return false;
+  if (predicate(node)) return true;
+  for (const key of Object.keys(node)) {
+    if (key === "loc" || key === "start" || key === "end" || key === "parent") continue;
+    const val = node[key];
+    if (Array.isArray(val)) {
+      for (const v of val) if (v && typeof v === "object" && v.type) if (nodeHas(v, predicate)) return true;
+    } else if (val && typeof val === "object" && val.type) {
+      if (nodeHas(val, predicate)) return true;
     }
   }
-  const missing = checks.find(([re, label]) => !re.test(c.body));
+  return false;
+}
+const isSuperCall = (n) => n.type === "CallExpression" && n.callee.type === "Super";
+const isThisPropAssign = (prop) => (n) =>
+  n.type === "AssignmentExpression" &&
+  n.left.type === "MemberExpression" &&
+  !n.left.computed &&
+  n.left.object.type === "ThisExpression" &&
+  n.left.property.type === "Identifier" &&
+  n.left.property.name === prop;
+const isSetIntervalCall = (n) =>
+  n.type === "CallExpression" &&
+  n.callee.type === "Identifier" &&
+  n.callee.name === "setInterval";
+
+const widgetChecks = [
+  ["super()",                  isSuperCall],
+  ["this.runtime = ...",       isThisPropAssign("runtime")],
+  ["this.requestRender = ...",  isThisPropAssign("requestRender")],
+  ["this.statusLineItems = ...",isThisPropAssign("statusLineItems")],
+  ["setInterval(...)",         isSetIntervalCall],
+];
+
+let widget = null;
+let widgetMissing = null;
+for (const c of classes) {
+  const missing = widgetChecks.find(([_, pred]) => !nodeHas(c.classNode, pred));
   if (missing) {
-    process.stderr.write(
-      `WIDGET candidate '${c.shortName}' missing feature: ${missing[1]}\n`,
-    );
+    widgetMissing = { name: c.name, missing: missing[0] };
     continue;
   }
   widget = c;
@@ -116,46 +183,56 @@ for (const c of classes) {
 }
 if (!widget) {
   process.stderr.write(
-    `ERROR: could not find widget class — no class extends '${base.shortName}'\n` +
-      "  with all 5 state-init features (super + runtime + requestRender + statusLineItems + setInterval)\n",
+    `ERROR: no class has all 5 widget features (super + this.runtime= + this.requestRender= + this.statusLineItems= + setInterval)\n` +
+      (widgetMissing ? `  (last candidate '${widgetMissing.name}' missing: ${widgetMissing.missing})\n` : "") +
+      "\n",
   );
   process.exit(2);
 }
-
-// --- Find END of widget class constructor -------------------------------
-// We need the byte offset of the closing `}` of the constructor method,
-// so the patcher can insert the sidecar-start hook right after it.
-// Strategy: locate "constructor(...)" inside widget body, then brace-count
-// from the `{` of its body.
-let ctorEnd = -1;
-const ctorMatch = widget.body.match(/\bconstructor\s*\([^)]*\)\s*\{/);
-if (!ctorMatch) {
-  process.stderr.write("ERROR: widget class has no constructor method\n");
+if (!widget.ctorMethod) {
+  process.stderr.write(`ERROR: widget '${widget.name}' has no constructor method\n`);
   process.exit(2);
 }
-const ctorBodyStart = ctorMatch.index + ctorMatch[0].length;
-{
-  let depth = 1;
-  let j = ctorBodyStart;
-  while (j < widget.body.length && depth > 0) {
-    if (widget.body[j] === "{") depth++;
-    else if (widget.body[j] === "}") depth--;
-    j++;
+// Note: render method is OPTIONAL — the patcher will add one if missing.
+// The patched launcher will have a render method we can use as an anchor.
+
+// ---- BASE = widget.superClass ------------------------------------------
+let base = null;
+let baseIsExternal = false;
+if (widget.superClassName) {
+  base = classes.find((c) => c.name === widget.superClassName);
+  if (!base) {
+    baseIsExternal = true;
+    base = { name: widget.superClassName, classNode: null, renderMethod: null, ctorMethod: null, superClassName: null };
   }
-  ctorEnd = widget.bodyStart + j - 1; // absolute byte offset of the `}` of ctor
-}
-if (ctorEnd < 0) {
-  process.stderr.write("ERROR: could not locate end of widget constructor body\n");
+} else {
+  process.stderr.write(`ERROR: widget '${widget.name}' has no superClass (extends nothing)\n`);
   process.exit(2);
 }
 
-// --- Emit shell-eval-able output -----------------------------------------
-const sq = (s) => "'" + s.replace(/'/g, "'\\''") + "'";
-process.stdout.write(`# mcode-find-anchors output for ${launcherPath}\n`);
-process.stdout.write(`BASE=${sq(base.shortName)}\n`);
-process.stdout.write(`WIDGET=${sq(widget.shortName)}\n`);
-process.stdout.write(`WIDGET_BODY_START=${widget.bodyStart}\n`);
-process.stdout.write(`WIDGET_BODY_END=${widget.bodyEnd}\n`);
-process.stdout.write(`CTOR_END=${ctorEnd}\n`);
-process.stdout.write(`# Verified: WIDGET extends BASE, has all 5 widget features\n`);
-process.stdout.write(`# Verified: widget class body is ${widget.bodyEnd - widget.bodyStart} bytes\n`);
+// ---- Byte offsets --------------------------------------------------------
+const WIDGET_BODY_END = widget.classNode.end - 1;
+const CTOR_END = widget.ctorMethod.end - 1;
+const RENDER_METHOD_END = widget.renderMethod ? widget.renderMethod.end - 1 : -1;
+
+if (RENDER_METHOD_END > 0 && WIDGET_BODY_END <= RENDER_METHOD_END) {
+  process.stderr.write(`ERROR: class body end (${WIDGET_BODY_END}) must be > render end (${RENDER_METHOD_END})\n`);
+  process.exit(2);
+}
+
+// ---- Emit shell-eval-able output -----------------------------------------
+const sq = (s) => "'" + String(s).replace(/'/g, "'\\''") + "'";
+process.stdout.write(`# mcode-find-anchors (acorn AST) for ${launcherPath}\n`);
+process.stdout.write(`BASE=${sq(baseIsExternal ? "external" : base.name)}\n`);
+process.stdout.write(`WIDGET=${sq(widget.name)}\n`);
+process.stdout.write(`RENDER_METHOD_END=${RENDER_METHOD_END}\n`);
+process.stdout.write(`WIDGET_BODY_END=${WIDGET_BODY_END}\n`);
+process.stdout.write(`CTOR_END=${CTOR_END}\n`);
+if (baseIsExternal) {
+  process.stdout.write(`# BASE is in another chunk; not patched (WIDGET alone is enough)\n`);
+} else {
+  process.stdout.write(`# Class body span: ${widget.classNode.start}..${widget.classNode.end} (${widget.classNode.end - widget.classNode.start} bytes)\n`);
+}
+process.stdout.write(`# Render method span: ${widget.renderMethod ? `${widget.renderMethod.start}..${widget.renderMethod.end}` : "(none, will be added by patcher)"}\n`);
+process.stdout.write(`# Constructor span: ${widget.ctorMethod.start}..${widget.ctorMethod.end}\n`);
+process.stdout.write(`# Total classes discovered: ${classes.length}\n`);

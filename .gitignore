@@ -1,0 +1,6 @@
+node_modules/
+*.log
+.DS_Store
+debug-*.mjs
+test-*.mjs
+count-types.mjs
