@@ -52,7 +52,7 @@ import { createRequire as _mcodeQuotaReq } from "node:module";
 import { existsSync } from "node:fs";
 const _require = _mcodeQuotaReq(import.meta.url);
 const CACHE_TTL_MS = 60_000;
-const FETCH_TIMEOUT_MS = 5_000;
+const FETCH_TIMEOUT_MS = 20_000;   // mmx can be slow on a busy network
 const SESSION_TTL_MS = 10_000;
 
 let raw = { valid: false, dRem: null, dReset: "", wRem: null, wReset: "", fetchedAt: 0 };
@@ -208,7 +208,15 @@ queueMicrotask(() => {
 //      alive past the launcher.
 let mmxAvailable = null;
 let mmxFailureCount = 0;
-const MMX_MAX_FAILURES = 3;
+// Cap is per session. 20s × 10 = 200s of "no quota" if mmx is broken —
+// we don't give up too eagerly because mmx is occasionally slow (~5s on
+// the user's network). 5 failed ticks covers a 5-minute outage, which is
+// the right trade-off: stay quiet during a transient mmx failure but
+// re-attempt when the user thinks it's been long enough.
+const MMX_MAX_FAILURES = 5;
+// After this many seconds since the last success, reset the failure
+// counter so a recovered mmx gets a fresh chance. 5 minutes.
+const MMX_FAILURE_RESET_MS = 5 * 60_000;
 
 function isMmxOnPath() {
   if (mmxAvailable !== null) return mmxAvailable;
@@ -262,19 +270,27 @@ const runMmx = () =>
 
 const fetchQuotaOnce = async () => {
   if (mmxFailureCount >= MMX_MAX_FAILURES) {
-    onUpdateCb?.();
-    return;
+    // After a long quiet period, give mmx a fresh chance — it may have
+    // recovered from a transient outage.
+    if (raw.lastSuccessAt && Date.now() - raw.lastSuccessAt > MMX_FAILURE_RESET_MS) {
+      mmxFailureCount = 0;
+    } else {
+      onUpdateCb?.();
+      return;
+    }
   }
   try {
     const payload = await runMmx();
     const g = pickGeneral(payload?.model_remains);
+    const now = Date.now();
     raw = {
       valid: !!g,
       dRem: pct(g?.current_interval_remaining_percent),
       dReset: fmtReset(g?.remains_time),
       wRem: pct(g?.current_weekly_remaining_percent),
       wReset: fmtReset(g?.weekly_remains_time),
-      fetchedAt: Date.now(),
+      fetchedAt: now,
+      lastSuccessAt: g ? now : (raw.lastSuccessAt || 0),
     };
     mmxFailureCount = 0;
   } catch (e) {
