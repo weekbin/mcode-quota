@@ -178,13 +178,27 @@ const label = (s) => ESC + C_LABEL + "m" + s + RESET_SEQ;
 const muted = (s) => ESC + C_MUTED + "m" + s + RESET_SEQ;
 const dot = () => muted("\\u2502");
 
-function renderOne(text, rem, reset, barWidth) {
-  if (rem == null) return label(text) + "  " + muted("(" + L_NO_DATA + ")");
+function renderOne(text, rem, reset, barWidth, labelWidth) {
+  if (rem == null) return paddedLabel(text, labelWidth) + "  " + muted("(" + L_NO_DATA + ")");
   const c = colorFor(rem);
   const barSeq = buildBar(rem, barWidth).text;
   const pctSeq = ESC + c + "m" + rem + "% " + L_LEFT + RESET_SEQ;
   const tail = reset ? "  " + muted(dot() + " " + L_RESET + " " + reset) : "";
-  return label(text) + " [" + barSeq + "] " + pctSeq + tail;
+  return paddedLabel(text, labelWidth) + " [" + barSeq + "] " + pctSeq + tail;
+}
+
+// Pad a label with full-width spaces (CJK) so 5小时使用量 and 周使用量 stack
+// with their colons aligned. ANSI reset is needed to avoid leaking the label
+// colour into the padding. Only applied when a positive labelWidth is given.
+const FULLWIDTH_SPACE = "\u3000";
+function paddedLabel(text, labelWidth) {
+  const raw = label(text);
+  const need = (labelWidth || 0) - dw(text);
+  if (need <= 0) return raw;
+  // Append fullwidth spaces inside the colour run so they render the same
+  // colour as the label and never get clipped by terminals that treat ASCII
+  // space as breakable.
+  return raw + ESC + C_LABEL + "m" + FULLWIDTH_SPACE.repeat(need) + RESET_SEQ;
 }
 
 // Trim trailing zeros so 1.00M reads as 1M and 1.50M as 1.5M.
@@ -252,8 +266,15 @@ const TAIL_MODE = (() => {
 })();
 
 // Render a single quota line at the widest bar that still fits the width.
+// For truly tiny terminals (sub-MIN_BAR_WIDTH) shrink the bar down to 1 char
+// rather than overflow — the user sees a sliver of the bar instead of a
+// clipped row, and the percent / labels still convey status.
 function fit(build, width) {
   for (let bar = MAX_BAR_WIDTH; bar >= MIN_BAR_WIDTH; bar--) {
+    const s = build(bar);
+    if (dw(s) <= width) return s;
+  }
+  for (let bar = MIN_BAR_WIDTH - 1; bar >= 1; bar--) {
     const s = build(bar);
     if (dw(s) <= width) return s;
   }
@@ -276,81 +297,91 @@ globalThis.__mcodeQuotaRender = function (width) {
   };
   const lines = [];
   if (raw.valid) {
-    // Horizontal omits reset times to save room; the other layouts keep them.
-    const q5h = (bar) => renderOne(L_LABEL_5H, raw.dRem, "", bar);
-    const qwh = (bar) => renderOne(L_LABEL_WEEK, raw.wRem, "", bar);
-    const q5 = (bar) => renderOne(L_LABEL_5H, raw.dRem, raw.dReset, bar);
-    const qw = (bar) => renderOne(L_LABEL_WEEK, raw.wRem, raw.wReset, bar);
+    // Two logical sections that render as separate rows:
+    //   top     — 5小时使用量 / 周使用量 (the "token usage" the user wants on
+    //             its own line, hugging the mcode status bar above it)
+    //   bottom  — 会话 tokens [breakdown] │ 上下文 (the "token counts" block)
+    //
+    // Each section is independently responsive: the top either combines the
+    // two bars on one line (when wide enough) or stacks them on two lines
+    // with aligned labels; the bottom is the legacy compact/full/auto tail.
+    // The two sections never share a row, so 会话 tokens is never pushed off
+    // screen just because the bars needed more room.
+    const labelWidth = Math.max(dw(L_LABEL_5H), dw(L_LABEL_WEEK));
 
-    // Each layout builder returns the rows it would use, or null when the
-    // layout cannot fit this width at all. They never touch the outer array.
-    const horizRows = (tail) => {
-      const h = fit((bar) => q5h(bar) + SEP + qwh(bar) + (tail ? SEP + tail : ""), width);
-      return dw(h) <= width ? [h] : null;
-    };
-    const narrowRows = (tail) => {
-      if (width < NARROW_MIN_WIDTH) {
-        const out = [fit(q5, width), fit(qw, width)];
-        if (tail) out.push(tail);
-        return out;
-      }
-      const out = [fit(q5, width)];
-      const combined = fit((bar) => qw(bar) + (tail ? SEP + tail : ""), width);
-      if (dw(combined) <= width) {
-        out.push(combined);
+    // 5h / week row builders. q* keeps reset times for stacked rows; q*h
+    // drops them when the bars share a single row. labelWidth keeps the
+    // 5h and 周 prefixes visually aligned when stacked.
+    const q5h = (bar) => renderOne(L_LABEL_5H, raw.dRem, "", bar, labelWidth);
+    const qwh = (bar) => renderOne(L_LABEL_WEEK, raw.wRem, "", bar, labelWidth);
+    const q5  = (bar) => renderOne(L_LABEL_5H, raw.dRem, raw.dReset, bar, labelWidth);
+    const qw  = (bar) => renderOne(L_LABEL_WEEK, raw.wRem, raw.wReset, bar, labelWidth);
+
+    // Top section (token usage): one combined row when it fits, otherwise
+    // two stacked rows with aligned labels.
+    const topCombined = (bar) => q5h(bar) + SEP + qwh(bar);
+    const topOneRow = fit(topCombined, width);
+    let topRows;
+    if (dw(topOneRow) <= width) {
+      topRows = [topOneRow];
+    } else {
+      // Reset times crowd very narrow terminals. Drop them and rely on the
+      // bar to convey status; below the 8-char bar floor the bar is already
+      // a sign that things are tight.
+      const q5n = (bar) => renderOne(L_LABEL_5H, raw.dRem, "", bar, labelWidth);
+      const qwn = (bar) => renderOne(L_LABEL_WEEK, raw.wRem, "", bar, labelWidth);
+      const stacked = [fit(q5n, width), fit(qwn, width)];
+      if (stacked.every((r) => dw(r) <= width)) {
+        topRows = stacked;
       } else {
-        // Weekly + tail still do not fit together: split onto a third row.
-        out.push(fit(qw, width));
-        if (tail) out.push(tail);
+        // Truly tiny (< ~50): drop the percent to keep the bar visible.
+        // Walk through label padding and bar width together to find ANY
+        // rendering that fits, however degraded. The bar stays a bar — the
+        // label can be aggressively truncated.
+        let best = null;
+        for (const lw of [labelWidth, 4, 0]) {
+          const q5s = (bar) => label(L_LABEL_5H) + " " + buildBar(raw.dRem, bar).text;
+          const qws = (bar) => paddedLabel(L_LABEL_WEEK, lw) + " " + buildBar(raw.wRem, bar).text;
+          const rows = [fit(q5s, width), fit(qws, width)];
+          if (rows.every((r) => dw(r) <= width)) { topRows = rows; best = null; break; }
+          best = rows;
+        }
+        if (best) topRows = best;
       }
-      return out;
+    }
+
+    // Bottom section (会话 tokens [breakdown] │ 上下文).
+    //
+    // Two-row layout is the contract: this block always fits on ONE row.
+    // Show the breakdown only when the terminal is wide enough that
+    // it does not crowd the row — >= 80 cols by default. Below that, drop
+    // the breakdown first, then drop 上下文 if absolutely needed.
+    // 会话 tokens is the only piece we will not drop.
+    const DETAIL_MIN_WIDTH = 80;
+    const bottomRows = () => {
+      const sessionFull = renderSessionChunk(false);
+      const sessionCompact = renderSessionChunk(true);
+      const ctx = renderContextChunk();
+      const allowDetail = TAIL_MODE === "full" ||
+        (TAIL_MODE === "auto" && width >= DETAIL_MIN_WIDTH);
+      // Build candidates in priority order: most info first, but only
+      // include what fits. Then return the first that fits.
+      const tryList = [];
+      if (allowDetail && sessionFull && ctx) tryList.push(sessionFull + SEP + ctx);
+      if (sessionCompact && ctx) tryList.push(sessionCompact + SEP + ctx);
+      if (allowDetail && sessionFull) tryList.push(sessionFull);
+      if (sessionCompact) tryList.push(sessionCompact);
+      if (ctx) tryList.push(ctx);
+      for (const c of tryList) if (dw(c) <= width) return [c];
+      // Best effort: longest attempt even if it overflows.
+      return [tryList[0] || sessionFull || sessionCompact || ctx || ""];
     };
 
-    const fullTail = buildTail(false);
-    const compactTail = buildTail(true);
-    // The full tail is only a candidate when it fits on a row by itself.
-    const canFull = dw(fullTail) <= width;
-    const candidates = [];
-    const offer = (rows, detail) => {
-      if (rows && rows.length) candidates.push({ rows, detail });
-    };
-    const offerFull = () => {
-      if (!canFull) return;
-      if (width >= HORIZ_MIN_WIDTH) offer(horizRows(fullTail), true);
-      offer(narrowRows(fullTail), true);
-    };
-    const offerCompact = () => {
-      if (width >= HORIZ_MIN_WIDTH) offer(horizRows(compactTail), false);
-      offer(narrowRows(compactTail), false);
-    };
-    if (TAIL_MODE === "auto") {
-      offerFull();
-      offerCompact();
-    } else if (TAIL_MODE === "full") {
-      offerFull();
-    } else {
-      offerCompact();
-    }
-    if (candidates.length) {
-      // Responsive rule, in order: fewest rows, then widest progress bar, then
-      // the breakdown. So a narrow terminal gives up the detail before it gives
-      // up a row or a readable bar, and the detail only appears once it costs
-      // neither. 会话 tokens / 上下文 are never dropped.
-      const barWidth = (rows) => {
-        const m = String(rows[0] || "").replace(ANSI_RE, "").match(/[█░]+/);
-        return m ? m[0].length : 0;
-      };
-      candidates.sort((a, b) =>
-        a.rows.length - b.rows.length ||
-        barWidth(b.rows) - barWidth(a.rows) ||
-        (b.detail ? 1 : 0) - (a.detail ? 1 : 0));
-      lines.push(...candidates[0].rows);
-    } else {
-      const tail = tailFor(width);
-      lines.push(fit(q5, width), fit(qw, width));
-      if (tail) lines.push(tail);
-    }
+    lines.push(...topRows);
+    const bottom = bottomRows();
+    if (bottom.length) lines.push(...bottom);
   } else {
+    // No quota data: still surface 会话 tokens / 上下文 if available.
     const tail = tailFor(width);
     if (tail) lines.push(tail);
   }

@@ -72,7 +72,7 @@ patcher 失败 → **自动回退到未打 patch 的官方 mcode**，不会卡�
 /home/weekbin/orca/projects/mcode/mcode-quota/mcode-quota-doctor
 ```
 
-期望 `18 ok, 0 warnings, 0 failures`。关键项：
+期望 `20 ok, 0 warnings, 0 failures`。关键项：
 
 ```
 [ok] mcode launcher pristine (no quota hooks)
