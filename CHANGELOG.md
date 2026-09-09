@@ -2,6 +2,15 @@
 
 记录每次对工具集的修改。新条目加在最上面。
 
+## 2026-09-09 — v3.0.2：双端备份（GitHub 私有 mirror）
+
+- 新建 GitHub 私有仓库 `weekbin/mcode-quota`（默认分支 `master`）
+- 历史通过 `git subtree split --prefix=mcode-quota` 从父 monorepo 抽出，
+  父仓库的 init commit 正确剔除，24 个内容 commit 全量推上 master
+- 新增 `mcodex-push-remote` 脚本：subtree split + 临时 mirror + gh-credential
+  helper + push 一条龙；幂等可重跑；父仓库的 remote 不被污染
+- 以后改完本地代码只需 `./mcodex-push-remote` 一行就同步到 GitHub
+
 ## 2026-09-09 — v3.0.0：硬编码逻辑全面 AST 化 + 升级漂移回归测试
 
 ### 动机

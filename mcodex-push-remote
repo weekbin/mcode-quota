@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# mcodex-push-remote — push local mcode-quota history to the GitHub backup.
+#
+# The local working tree lives inside a parent monorepo (git root = the
+# directory above this file). The remote (github.com/weekbin/mcode-quota)
+# wants mcode-quota files at the repo root, not under a subdir. This
+# script does the subtree split + push in one shot.
+#
+# Usage:
+#   mcodex-push-remote [remote-url]
+#   default remote-url: https://github.com/weekbin/mcode-quota.git
+#
+# Safe to re-run: it always rebuilds the local standalone branch from the
+# parent history and force-pushes. The parent repo's remote is never
+# modified — we use a temp mirror at $TMP/mcodex-push-mirror.
+
+set -euo pipefail
+
+QUOTA_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Git root = parent of QUOTA_DIR (this script is a subdir of the monorepo)
+PARENT_REPO="$(cd "${QUOTA_DIR}/.." && pwd)"
+SUBPATH="$(basename "${QUOTA_DIR}")"
+REMOTE_URL="${1:-https://github.com/weekbin/mcode-quota.git}"
+MIRROR="$(mktemp -d -t mcodex-push-mirror.XXXXXX)"
+trap 'rm -rf "${MIRROR}"' EXIT
+
+if [[ ! -d "${PARENT_REPO}/.git" ]]; then
+  echo "mcodex-push-remote: parent git repo not found at ${PARENT_REPO}" >&2
+  exit 1
+fi
+
+echo "[1/3] splitting ${SUBPATH}/ history out of ${PARENT_REPO} ..."
+(
+  cd "${PARENT_REPO}"
+  git subtree split --prefix="${SUBPATH}" -b mcode-quota-standalone
+)
+
+echo "[2/3] staging into temp mirror at ${MIRROR} ..."
+(
+  cd "${PARENT_REPO}"
+  git init -q -b master "${MIRROR}"
+  cd "${MIRROR}"
+  git fetch -q "${PARENT_REPO}" mcode-quota-standalone:fetched
+  # The fetched branch is the standalone history; check it out as master.
+  git checkout -q -b master fetched
+  git branch -q -D fetched 2>/dev/null || true
+)
+
+echo "[3/3] pushing to ${REMOTE_URL} ..."
+(
+  cd "${MIRROR}"
+  git remote add origin "${REMOTE_URL}"
+  # Use gh's credential helper so we don't need to re-auth.
+  git -c credential.helper='!gh auth git-credential' push -u origin master
+)
+
+echo "done: ${REMOTE_URL}"
