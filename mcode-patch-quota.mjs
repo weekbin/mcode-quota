@@ -216,9 +216,9 @@ function renderSessionChunk(compact) {
   const totalSeq = ESC + C_SUCCESS + "m" + fmtTok(session.total) + RESET_SEQ;
   if (compact) return label(L_LABEL_SESSION) + " " + totalSeq;
   const d = " " + dot() + " ";
-  const detail = " (" + L_IN + " " + fmtTok(session.input) + d +
+  const detail = " 「" + L_IN + " " + fmtTok(session.input) + d +
                  L_OUT + " " + fmtTok(session.output) + d +
-                 L_CACHE + " " + fmtTok(session.cache) + ")";
+                 L_CACHE + " " + fmtTok(session.cache) + "」";
   return label(L_LABEL_SESSION) + " " + totalSeq + detail;
 }
 
@@ -393,9 +393,12 @@ globalThis.__mcodeQuotaRender = function (width) {
       return [tryList[0] || sessionFull || sessionCompact || ctx || ""];
     };
 
-    lines.push(...topRows);
+    // v2.5: section order swapped. 会话 tokens + 上下文 now lives on top
+    // (closest to the mcode status bar); the token-usage bars (小时会话窗口
+    // / 周限制使用量) are below.
     const bottom = bottomRows();
     if (bottom.length) lines.push(...bottom);
+    lines.push(...topRows);
   } else {
     // No quota data: still surface 会话 tokens / 上下文 if available.
     const tail = tailFor(width);

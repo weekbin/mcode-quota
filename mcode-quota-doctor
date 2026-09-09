@@ -170,20 +170,19 @@ if [[ -f "$SIDECAR" ]]; then
   else
     warn "separator is not │"
   fi
-  # Section contract (v2.3): the quota block has two rows on the wide layout:
-  # a token-usage row and a 会话 tokens row, and 小时会话窗口 is the FIRST line.
-  WIDE_LINES="$(printf '%s' "$WIDE" | awk '/小时会话窗口/{f=1} f{print; if(/上下文 [0-9]%/) exit}')"
-  WIDE_FIRST="$(printf '%s' "$WIDE_LINES" | head -1 | tr -d ' ')"
-  WIDE_LAST="$(printf '%s' "$WIDE_LINES" | grep -c '上下文 ' || true)"
-  if printf '%s' "$WIDE_LINES" | head -1 | grep -q "小时会话窗口"; then
-    ok "section contract: token-usage row first (小时会话窗口 on top)"
+  # Section contract (v2.5): the quota block has two rows on the wide layout:
+  # 会话 tokens + 上下文 is on TOP (closest to the mcode status bar above it);
+  # the token-usage row (小时会话窗口 / 周限制使用量) is BELOW.
+  WIDE_LINES="$(printf '%s' "$WIDE" | awk '/会话 tokens/{f=1} f{print; if(/周限制使用量|小时会话窗口/) {found=1; exit}}')"
+  if printf '%s' "$WIDE_LINES" | head -1 | grep -q "会话 tokens"; then
+    ok "section contract: 会话 tokens row first (closest to mcode status bar)"
   else
-    warn "section contract violated: 小时会话窗口 should be the first line"
+    warn "section contract violated: 会话 tokens should be the first line"
   fi
-  if [[ "$WIDE_LAST" -ge 1 ]]; then
-    ok "section contract: 会话 tokens row on bottom (上下文 present)"
+  if printf '%s' "$WIDE_LINES" | grep -q "小时会话窗口\|周限制使用量"; then
+    ok "section contract: token-usage row below (小时会话窗口 / 周限制使用量)"
   else
-    warn "section contract violated: 上下文 should be in the bottom row"
+    warn "section contract violated: token-usage row should be below"
   fi
 fi
 
