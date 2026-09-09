@@ -203,13 +203,14 @@ function paddedLabel(text, labelWidth) {
   return raw + ESC + C_LABEL + "m" + FULLWIDTH_SPACE.repeat(need) + RESET_SEQ;
 }
 
-// Trim trailing zeros so 1.00M reads as 1M and 1.50M as 1.5M.
-const trimNum = (s) => s.replace(/\\.0+$/, "").replace(/(\\.\\d*[1-9])0+$/, "$1");
-
+// Pad to exactly one decimal place so the precision is uniform across all
+// numbers shown in the status bar: 4.3M / 42.0K / 217.8M / 618 (no unit). The
+// trailing ".0" is kept on K/M values so the column width does not jump
+// when a counter crosses a power of ten (e.g. 9.9K -> 10.0K vs 9.9K -> 10K).
 const fmtTok = (n) => {
   if (!Number.isFinite(n)) return "0";
-  if (n >= 1_000_000) return trimNum((n / 1_000_000).toFixed(n >= 10_000_000 ? 1 : 2)) + "M";
-  if (n >= 1_000) return trimNum((n / 1_000).toFixed(n >= 10_000 ? 0 : 1)) + "K";
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + "M";
+  if (n >= 1_000) return (n / 1_000).toFixed(1) + "K";
   return String(n);
 };
 
@@ -248,9 +249,11 @@ function renderContextChunk() {
   // Mirrors mcode's own "Context N% left" thresholds, inverted to used-percent:
   // warn at 75% used, error at 90% used (25% / 10% left).
   const col = c.pct >= 90 ? C_ERROR : c.pct >= 75 ? C_WARNING : C_SUCCESS;
-  // Show the real numbers next to the percentage: "上下文 42K/200K 21%".
-  const amount = muted(fmtTok(c.used) + "/" + fmtTok(c.window));
-  return label(L_CONTEXT) + " " + amount + " " + ESC + col + "m" + c.pct + "%" + RESET_SEQ;
+  // Compact form: "51% 「259K/512K」" — percentage first, then the absolute
+  // numbers in full-width brackets. Drop the "上下文" label to save space and
+  // let the leading percent do the talking.
+  const amount = muted("「" + fmtTok(c.used) + "/" + fmtTok(c.window) + "」");
+  return ESC + col + "m" + c.pct + "%" + RESET_SEQ + " " + amount;
 }
 
 // Cache hit rate: how much of the prompt was served from the prompt cache.
