@@ -185,11 +185,11 @@ const muted = (s) => ESC + C_MUTED + "m" + s + RESET_SEQ;
 const dot = () => muted("\\u2502");
 
 function renderOne(text, rem, reset, barWidth, labelWidth) {
-  if (rem == null) return paddedLabel(text, labelWidth) + "  " + muted("(" + L_NO_DATA + ")");
+  if (rem == null) return paddedLabel(text, labelWidth) + " " + muted("(" + L_NO_DATA + ")");
   const c = colorFor(rem);
   const barSeq = buildBar(rem, barWidth).text;
   const pctSeq = ESC + c + "m" + rem + "% " + L_LEFT + RESET_SEQ;
-  const tail = reset ? "  " + muted(dot() + " " + L_RESET + " " + reset) : "";
+  const tail = reset ? " " + muted(dot() + " " + L_RESET + " " + reset) : "";
   return paddedLabel(text, labelWidth) + " [" + barSeq + "] " + pctSeq + tail;
 }
 
@@ -276,7 +276,11 @@ function renderTurnCountChunk() {
   return label(L_TURN) + " " + muted(String(session.turns));
 }
 
-const SEP = "  " + ESC + C_MUTED + "m\\u2502" + RESET_SEQ + "  ";
+// Separator: 1 ASCII space on each side of the │. Together with the
+// 1-char space already in adjacent chunks this gives a comfortable 2-col
+// gap; the previous 2+2 left visible whitespace gaps that competed with
+// the already-padded labels.
+const SEP = " " + ESC + C_MUTED + "m\\u2502" + RESET_SEQ + " ";
 const HORIZ_MIN_WIDTH = 110;
 const NARROW_MIN_WIDTH = 80;
 // How the 输入/输出/缓存 breakdown trades off against row count.
