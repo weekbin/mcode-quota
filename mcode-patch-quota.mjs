@@ -232,17 +232,57 @@ function renderSessionChunk(compact) {
 // Context budget. mcode already keeps this in the shell state it feeds its own
 // "Context N% left" indicator: contextUsage is the runtime context snapshot
 // ({ usedTokens, contextWindowTokens }), with the model window as a fallback.
+//
+// mcode may expose the runtime as a separate global. If the shell state path
+// does not yield a contextUsage, try the runtime getContextSnapshot API
+// (synchronous if it returns a snapshot, async otherwise - we only use sync
+// results here).
 function readContextUsage() {
   const sh = globalThis.__mcodeShellState;
-  if (!sh) return null;
-  const cu = sh.contextUsage;
-  if (!cu || !Number.isFinite(cu.usedTokens)) return null;
-  const win = Number.isFinite(cu.contextWindowTokens) && cu.contextWindowTokens > 0
+  let cu = sh?.contextUsage;
+  let win = (Number.isFinite(cu?.contextWindowTokens) && cu.contextWindowTokens > 0)
     ? cu.contextWindowTokens
-    : (Number.isFinite(sh.contextWindowTokens) && sh.contextWindowTokens > 0
+    : (Number.isFinite(sh?.contextWindowTokens) && sh.contextWindowTokens > 0
         ? sh.contextWindowTokens
         : null);
-  if (!win) return null;
+  if (!cu || !Number.isFinite(cu.usedTokens)) {
+    // Fallback: ask the runtime directly. Older mcode put context on the
+    // runtime; newer mcode moved it to shellState. Cover both.
+    //
+    // SAFETY: getContextSnapshot is async and requires a sessionId. Calling
+    // it without one makes mcode 0.3.10 throw "Runtime did not return Session
+    // undefined." The returned Promise is then rejected, and a missing
+    // .catch on the sidecar turns it into an unhandledRejection that mcode's
+    // process handler turns into "TUI stopped unexpectedly". So:
+    //   1. only call the runtime API when we actually have a sessionId, AND
+    //   2. always attach a .catch so a rejection can never escape, AND
+    //   3. only adopt the snapshot synchronously (this function is sync) —
+    //      an unresolved Promise is never used as cu.
+    const rt = globalThis.__mcodeRuntime;
+    const sid = globalThis.__mcodeShellState?.agentSessionId
+      || globalThis.__mcodeRuntime?.agentSessionId
+      || null;
+    if (sid && typeof rt?.getContextSnapshot === "function") {
+      try {
+        const maybe = rt.getContextSnapshot(sid);
+        // Always catch, even when we don't use the value, so the rejection
+        // never becomes unhandled.
+        if (maybe && typeof maybe.then === "function") {
+          maybe.then(() => {}).catch(() => {});
+        }
+        // We can't await in this sync path. Older mcode that returned the
+        // snapshot synchronously will still hit the value here, so we accept
+        // either shape.
+        if (maybe && typeof maybe === "object" && Number.isFinite(maybe.usedTokens)) {
+          cu = maybe;
+          if (!win && Number.isFinite(maybe.contextWindowTokens) && maybe.contextWindowTokens > 0) {
+            win = maybe.contextWindowTokens;
+          }
+        }
+      } catch {}
+    }
+  }
+  if (!cu || !Number.isFinite(cu.usedTokens) || !win) return null;
   pendingPlaceholders.context = false;
   const used = Math.max(0, Math.min(cu.usedTokens, win));
   return { used, window: win, pct: Math.round((used / win) * 100) };
@@ -653,6 +693,61 @@ const SQLITE_SESSION_SQL = "SELECT " +
 
 let sqliteDb = null;
 let sqliteDbPath = null;
+let sqliteColumns = null;   // resolved column names from the live table
+
+// Discover the actual column names the mcode runtime uses. We support
+// both the current schema and a few likely renames. Cache the result for
+// the life of the sidecar.
+async function resolveSqliteColumns(db) {
+  if (sqliteColumns) return sqliteColumns;
+  let cols;
+  try {
+    cols = db.prepare("PRAGMA table_info(local_runtime_token_usage)").all();
+  } catch {
+    return null;
+  }
+  const names = new Set(cols.map(c => c.name));
+  const pick = (candidates) => {
+    for (const c of candidates) if (names.has(c)) return c;
+    return null;
+  };
+  const resolved = {
+    input:        pick(["input_tokens", "inputTokens", "input"]),
+    output:       pick(["output_tokens", "outputTokens", "output"]),
+    reasoning:    pick(["reasoning_tokens", "reasoningTokens", "reasoning"]),
+    cacheRead:    pick(["cache_read_tokens", "cacheReadTokens", "cacheRead", "cache_read"]),
+    cacheWrite:   pick(["cache_write_tokens", "cacheWriteTokens", "cacheWrite", "cache_write"]),
+    cost:         pick(["cost_usd", "costUsd", "cost"]),
+    turnId:       pick(["turn_id", "turnId", "turn"]),
+    session:      pick(["session_id", "sessionId", "session"]),
+  };
+  if (!resolved.input || !resolved.output || !resolved.cacheRead || !resolved.session) {
+    return null;   // essential columns missing; abort
+  }
+  sqliteColumns = resolved;
+  return resolved;
+}
+
+const buildSessionSql = (cols) => {
+  // Build the SELECT with COALESCE on every resolved column, with
+  // friendly aliases. Inputs not in the live table default to 0.
+  // NOTE: this file is itself wrapped in an outer template literal, so any
+  // inner template literals (backticks) would be misinterpreted. Use plain
+  // string concatenation everywhere inside this function.
+  const c = (name, def) => "COALESCE(" + name + ", " + def + ")";
+  const turns = cols.turnId
+    ? "COUNT(DISTINCT " + cols.turnId + ") AS turns"
+    : "0 AS turns";
+  return "SELECT " +
+    c(cols.input, "0") + " AS inputTokens, " +
+    c(cols.output, "0") + " AS outputTokens, " +
+    c(cols.reasoning || "0", "0") + " AS reasoningTokens, " +
+    c(cols.cacheRead, "0") + " AS cacheReadTokens, " +
+    c(cols.cacheWrite || "0", "0") + " AS cacheWriteTokens, " +
+    c(cols.cost || "0", "0") + " AS costUsd, " +
+    turns + " " +
+    "FROM local_runtime_token_usage WHERE " + cols.session + " = ?";
+};
 
 async function fetchSessionFromSqlite(sessionId) {
   try {
@@ -663,7 +758,10 @@ async function fetchSessionFromSqlite(sessionId) {
       sqliteDb = new DatabaseSync(SQLITE_DEFAULT_PATH, { readOnly: true });
       sqliteDbPath = SQLITE_DEFAULT_PATH;
     }
-    const row = sqliteDb.prepare(SQLITE_SESSION_SQL).get(sessionId);
+    const cols = await resolveSqliteColumns(sqliteDb);
+    if (!cols) return null;
+    const sql = buildSessionSql(cols);
+    const row = sqliteDb.prepare(sql).get(sessionId);
     if (!row) return null;
     return {
       inputTokens: Number(row.inputTokens ?? 0),
@@ -879,17 +977,35 @@ function findLauncherChunk() {
 
 const LAUNCHER_MARKER = "__mcodeQuotaRender";
 
-// render() override inserted as the last member of the widget class.
-//   - captures runtime + shellState for the sidecar
-//   - stores the widget so the sidecar can call requestRender()
-//   - appends the quota lines returned by the sidecar
-const PATCH_RENDER =
-  `render(e){let r=super.render(e);` +
-  `if(this&&this.runtime)globalThis.__mcodeRuntime=this.runtime;` +
-  `if(this&&this.shellState)globalThis.__mcodeShellState=this.shellState;` +
-  `globalThis.__mcodeQuotaWidget=this;` +
-  `if(Array.isArray(r)){let _qr=typeof globalThis.__mcodeQuotaRender==="function"` +
-  `?globalThis.__mcodeQuotaRender(e):[];if(Array.isArray(_qr)&&_qr.length>0)return[...r,..._qr]}return r}`;
+// Build the render() override using the AST-discovered prop names. If the
+// finder couldn't identify a name (empty string), we omit that capture line
+// rather than hardcoding a guess. The sidecar treats those globals as
+// optional and falls back to alternative sources (see renderContextChunk).
+//
+// Output shape (one method definition appended to the widget class body):
+//   render(e){
+//     let r=super.render(e);
+//     if(this&&this.<RUNTIME>)globalThis.__mcodeRuntime=this.<RUNTIME>;
+//     if(this&&this.<SHELL>)globalThis.__mcodeShellState=this.<SHELL>;
+//     globalThis.__mcodeQuotaWidget=this;
+//     if(Array.isArray(r)){let _qr=typeof globalThis.__mcodeQuotaRender==="function"
+//       ?globalThis.__mcodeQuotaRender(e):[];
+//       if(Array.isArray(_qr)&&_qr.length>0)return[...r,..._qr]}
+//     return r
+//   }
+const buildPatchRender = (runtimeProp, shellStateProp) => {
+  const identRe = /^[A-Za-z_$][A-Za-z0-9_$]*$/;
+  const safeRuntime = identRe.test(runtimeProp) ? runtimeProp : "";
+  const safeShell = identRe.test(shellStateProp) ? shellStateProp : "";
+  let body = "render(e){let r=super.render(e);";
+  if (safeRuntime) body += `if(this&&this.${safeRuntime})globalThis.__mcodeRuntime=this.${safeRuntime};`;
+  if (safeShell) body += `if(this&&this.${safeShell})globalThis.__mcodeShellState=this.${safeShell};`;
+  body +=
+    `globalThis.__mcodeQuotaWidget=this;` +
+    `if(Array.isArray(r)){let _qr=typeof globalThis.__mcodeQuotaRender==="function"` +
+    `?globalThis.__mcodeQuotaRender(e):[];if(Array.isArray(_qr)&&_qr.length>0)return[...r,..._qr]}return r}`;
+  return body;
+};
 
 function patchLauncherChunk(launcherPath) {
   const content = readFileSync(launcherPath, "utf-8");
@@ -922,6 +1038,7 @@ function patchLauncherChunk(launcherPath) {
     return false;
   }
 
+  const PATCH_RENDER = buildPatchRender(kv.RUNTIME_PROP || "", kv.SHELLSTATE_PROP || "");
   const patched = content.slice(0, WIDGET_BODY_END) + PATCH_RENDER + content.slice(WIDGET_BODY_END);
   const tmp = launcherPath + ".tmpcheck.js";
   writeFileSync(tmp, patched, "utf-8");

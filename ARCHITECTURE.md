@@ -91,9 +91,23 @@ import "/home/weekbin/orca/projects/mcode/mcode-quota/sidecar/mcode-quota-fetche
 ```js
 globalThis.__mcodeQuotaRender(width) -> string[]   // 渲染行（含 ANSI 颜色）
 globalThis.__mcodeQuotaStart()                     // 手动启动（一般不需要）
-globalThis.__mcodeRuntime / __mcodeShellState      // 由 patch 1 注入
+globalThis.__mcodeRuntime / __mcodeShellState      // 由 patch 1 注入，属性名由 mcode-find-anchors AST 推断
 globalThis.__mcodeQuotaWidget                      // 由 patch 1 注入
 ```
+
+### 3.0 抗升级漂移（v3.0 起）
+
+注入链的每一处"假设 mcode 不变"在 v3.0 全部替换为 AST 推断 / 候选优先级 / 运行时 fallback：
+
+| 位置 | 实现 | 见 D25 |
+|---|---|---|
+| widget 识别 | 3 个结构化特征（super + setInterval + ctor 模式） | `mcode-find-anchors.mjs` |
+| 属性名发现 | 扫描 ctor `this.X = param` / `this.X = param.Y`，按候选优先级匹配 | `discoverPropNames()` |
+| `PATCH_RENDER` | 接收 `RUNTIME_PROP` / `SHELLSTATE_PROP`，动态拼接 | `buildPatchRender()` |
+| 上下文数据源 | shellState.contextUsage → contextWindowTokens → runtime.getContextSnapshot | `readContextUsage()` |
+| session SQL | 运行时 `PRAGMA table_info` + 候选列名 | `resolveSqliteColumns()` / `buildSessionSql()` |
+
+升级回归测试：`node mcode-smoke.mjs` 模拟 5 种 mcode 字段重命名场景 + 1 个端到端 fork 重建，25 个断言全绿。
 
 ### 3.1 懒启动（关键）
 

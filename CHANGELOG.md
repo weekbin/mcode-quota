@@ -2,6 +2,141 @@
 
 记录每次对工具集的修改。新条目加在最上面。
 
+## 2026-09-09 — v3.0.0：硬编码逻辑全面 AST 化 + 升级漂移回归测试
+
+### 动机
+
+> 整理相关文档，脚本内容，并按照 ast 语法的角度进行注入逻辑的优化，sql 查询语句的优化，最终产出就算 mcode update 了之后，仍能够一定程度保持跟踪注入的方式。我们绝对不能把某些逻辑硬编码为正则匹配或者硬编码的逻辑，锁死在当前 mcode 版本上，一旦更新了就不能注入了。
+
+之前 mcode-find-anchors 的 5 特征里有 3 个是**硬编码属性名**（`runtime` / `requestRender` / `statusLineItems`），
+sidecar 的 `PATCH_RENDER` 也是手写 `this.runtime` / `this.shellState`。这些在 mcode 重命名 / 改变构造签名时
+就会失效。本次整体性替换为 **AST 推断 + 名称候选优先级** + **运行时容错链**。
+
+### 变更
+
+#### 1. mcode-find-anchors：硬编码名称 → AST 推断
+
+- **widget 识别**改为三特征（全部结构化，不依赖属性名）：
+  - 存在 `super()` 调用
+  - 类体内有 `setInterval(...)` 调用（这是 widget 唯一稳定的结构信号 — 状态栏轮询）
+  - 构造器接收 ≥ 2 个参数，并将其中的 ≥ 2 个赋给 `this.X` 字段
+- **`render` 方法不再是必需**：mcode widget 可继承基类的 `render`，不应误判。
+- **属性名推断**：扫描构造器体，对每个 `this.X = firstParam` 或 `this.X = firstParam.Y`，
+  按优先级 `runtime > _runtime > rt > tu > r > context > ctx` 选 `runtime`；按
+  `shellState > _shellState > shell > state` 选 `shellState`；找到后 emit `RUNTIME_PROP` / `SHELLSTATE_PROP`。
+- **去掉 `BASE = widget.superClass` 的硬编码检查**：基类名也会动态从 `widget.superClass.name` 读取。
+
+#### 2. mcode-patch-quota：动态 PATCH_RENDER
+
+- 不再硬编码 `this.runtime` / `this.shellState`。
+- `PATCH_RENDER` 改为 `buildPatchRender(runtimeProp, shellStateProp)` 函数，
+  从 `mcode-find-anchors` 拿到的 AST 推断结果拼出方法体。
+- 标识符有正则校验（`/^[A-Za-z_$][A-Za-z0-9_$]*$/`），不合法时跳过对应行（不写脏字符串）。
+
+#### 3. sidecar 数据源：上下文容错链
+
+- `readContextUsage()` 现在走 fallback 链：
+  1. `__mcodeShellState.contextUsage.usedTokens`（新 mcode）
+  2. `__mcodeShellState.contextWindowTokens`（窗口大小回退）
+  3. `__mcodeRuntime.getContextSnapshot(sid)`（旧 mcode，runtime 直接提供；只在
+     有 `agentSessionId` 时才调；返回 Promise 时显式 `.catch(() => {})` 避免
+     unhandledRejection 触发 mcode 0.3.10 的进程级 TUI-stopped 处理）
+- 任一可用即采纳，缺失返回 null 并显示占位符。
+- **同步路径只采纳同步结果**：mcode 0.3.10 的 `getContextSnapshot` 是 async
+  返回 Promise，这里是 render 同步路径，async 结果无法立即使用（让 async
+  snapshot 走下次 render 即可），但绝不能因为 reject 而让 Promise 逃逸到
+  进程级 unhandledRejection 监听器。
+
+#### 4. SQL 查询：列名 schema 探测
+
+- 之前 `SQLITE_SESSION_SQL` 是**硬编码**列名 `input_tokens` / `output_tokens` / ...
+  的聚合查询。
+- 现在 `fetchSessionFromSqlite` 走 `resolveSqliteColumns(db)`：运行时 `PRAGMA
+  table_info(...)` 拿实际列名，按候选列表 `["input_tokens", "inputTokens", "input"]` 等
+  匹配，再用 `buildSessionSql(cols)` 动态生成 SQL。
+- mcode 改列名、合并表、引入新表时**自动适应**，不会因列名漂移而静默 0 行。
+- 必要列（`input / output / cache_read / session_id`）缺失才返回 null。
+
+#### 5. mcode-smoke.mjs：升级漂移回归测试
+
+- 新增 `mcode-smoke.mjs`，从真实 launcher 拷贝 + 模拟 mcode 改名 / 删字段 / 调换 ctor 顺序，
+  跑 finder 和 patcher，断言所有锚点仍能正确发现。
+- **5 个场景 + 25 个断言全绿**，覆盖：
+  - 基线未改动
+  - `this.runtime` → `this.engine` 单字段重命名
+  - 三个 widget 字段全部重命名
+  - 删除 `statusLineItems` 赋值
+  - ctor 参数名 `t` → `ttx` 改名
+- 新增 fork 端到端：完整 rebuild 一次 fork，验证 launcher 真的被 patch 上了 render
+  override 且 `__mcodeShellState` / `__mcodeRuntime` 都被捕获。
+- 跑：`node mcode-smoke.mjs`。
+
+### 验证
+
+- 真实 mcode 0.3.10 launcher：finder 仍正确返回 `WIDGET=jf`, `RUNTIME_PROP=runtime`,
+  `SHELLSTATE_PROP=shellState`（与 v2.9 完全等价）
+- 模拟 mcode 重命名 widget 字段：finder 自动发现新名（`engine` 等）
+- mcode-smoke 25/25 通过
+- doctor 22 ok / 0 warn / 0 fail
+- 22 项单元断言全绿
+- 20–260 列扫描 0 溢出
+- 真实 pty 250 列：渲染正常
+
+### 仍非万无一失
+
+这些改进让 mcode 升级后的注入成功率从「依赖具体类名 / 列名」提升到「依赖行为签名」，
+但以下场景仍可能需要更新代码：
+- mcode 把 widget 移出 launcher-*.js chunk（patcher 找不到 launcher）
+- mcode 把 setInterval 改为 requestAnimationFrame / queueMicrotask（finder 漏过 widget 特征）
+- mcode 重构 widget 构造器、把 shell state 改为非首参数（finder 仍能识别但 PATCH_RENDER 取错字段）
+
+mcode-smoke 模拟了其中部分情况，但完整覆盖需要真实 mcode 升级验证。
+
+## 2026-09-09 — v3.0.1：fix v3.0.0 unhandledRejection 闪退
+
+### 症状
+
+v3.0.0 上线后 mcodex 启动后约 50s 闪退：
+
+```
+Minimax Code TUI stopped unexpectedly: Session not found: undefined. Restart MCode;
+if it keeps happening, report it through an available support channel.
+```
+
+真实 pty 抓包：崩溃发生在用户输入 "hi" 触发本地 turn 提交之后。
+
+### 根因
+
+v3.0.0 在 `readContextUsage()` 的 fallback 路径里同步调用了 `runtime.getContextSnapshot()`
+—— **没有传 sessionId 参数**。该 API 在 mcode 0.3.10 是 async 实现，内部走
+`i.getSession({id:undefined})` → `if(!s)throw new Error("Runtime did not return Session undefined.")`。
+
+我们的同步 `try/catch` 只能抓同步抛错，async 返回的 Promise 是**已经 rejected** 的
+—— 而且我们既没 await，也没在 Promise 上挂 `.catch`，于是 Node.js 的 `unhandledRejection`
+事件触发 mcode 0.3.10 的进程级 handler：
+
+```js
+e.once("unhandledRejection", u => c(m(u)))
+```
+
+最终以 `TUI stopped unexpectedly` 形式退出。错误信息中的 "Session not found: undefined"
+是 mcode 内部 unhandledRejection 落地时输出的非首要文案。
+
+### 修复
+
+1. `getContextSnapshot` 只在有 `agentSessionId` 时才调（之前是无条件调）
+2. 一旦调，无论结果用不用，Promise 都接 `.then(() => {}).catch(() => {})`，让
+   reject 永远无法升级为 unhandledRejection
+3. 同步路径只采纳同步结果（async snapshot 走下次 render）
+
+### 验证
+
+- 真实 pty 140 列：TUI 不再闪退，`会话 tokens 25.1K` / `上下文 21% 「42.0K/200.0K」` /
+  `缓存命中 13%` / `轮数 61` 全部正常出数
+- mcode-smoke 25/25 通过
+- doctor 22 ok / 0 warn / 0 fail
+- mcode 本体 0 字节修改（fork 隔离成立）
+
 ## 2026-09-09 — v2.9.0：缩减多余空格
 
 ### 诉求

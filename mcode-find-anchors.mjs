@@ -162,29 +162,95 @@ const isSetIntervalCall = (n) =>
   n.callee.type === "Identifier" &&
   n.callee.name === "setInterval";
 
-const widgetChecks = [
-  ["super()",                  isSuperCall],
-  ["this.runtime = ...",       isThisPropAssign("runtime")],
-  ["this.requestRender = ...",  isThisPropAssign("requestRender")],
-  ["this.statusLineItems = ...",isThisPropAssign("statusLineItems")],
-  ["setInterval(...)",         isSetIntervalCall],
-];
+// Structural widget check: instead of hardcoding `this.runtime = ...` etc.,
+// the widget class is identified by three purely structural features:
+//   1. has a superclass
+//   2. has a setInterval() call somewhere in its body (status bar polling
+//      — the real discriminator; only widgets poll like this)
+//   3. its constructor takes >= 2 params and assigns >= 2 of them to
+//      instance fields (i.e. the widget receives the shell state, runtime,
+//      and requestRender from the framework)
+// `render` is NOT required: mcode widgets may inherit it from the base
+// class (which is common in Ink-style inheritance hierarchies).
+const isWidgetClass = (classNode) => {
+  if (!classNode.superClass) return false;
+  // (2) the status-bar polling signature. If a class doesn't call
+  // setInterval, it's a leaf component, not the status-bar widget.
+  if (!nodeHas(classNode, isSetIntervalCall)) return false;
+  // (3) ctor assigns >= 2 ctor params to instance fields
+  const ctor = classNode.body.body.find(m => m.type === "MethodDefinition" && m.kind === "constructor");
+  if (!ctor || ctor.value.type !== "FunctionExpression") return false;
+  const params = ctor.value.params.filter(p => p && p.type === "Identifier");
+  if (params.length < 2) return false;
+  const paramNames = new Set(params.map(p => p.name));
+  let assignedParams = new Set();
+  function visit(n) {
+    if (!n || typeof n !== "object" || !n.type) return;
+    if (n.type === "AssignmentExpression" && n.operator === "=" &&
+        n.left.type === "MemberExpression" && !n.left.computed &&
+        n.left.object.type === "ThisExpression" && n.left.property.type === "Identifier") {
+      // RHS: this.X = firstParam  OR  this.X = firstParam.Y
+      if (n.right.type === "Identifier" && paramNames.has(n.right.name)) {
+        assignedParams.add(n.right.name);
+      } else if (n.right.type === "MemberExpression" && !n.right.computed &&
+                 n.right.object.type === "Identifier" && paramNames.has(n.right.object.name)) {
+        assignedParams.add(n.right.object.name);
+      }
+    }
+    for (const k of Object.keys(n)) {
+      if (k === "loc" || k === "start" || k === "end") continue;
+      const v = n[k];
+      if (Array.isArray(v)) v.forEach(visit);
+      else if (v && typeof v === "object") visit(v);
+    }
+  }
+  visit(ctor.value.body);
+  return assignedParams.size >= 2;
+};
 
 let widget = null;
 let widgetMissing = null;
 for (const c of classes) {
-  const missing = widgetChecks.find(([_, pred]) => !nodeHas(c.classNode, pred));
-  if (missing) {
-    widgetMissing = { name: c.name, missing: missing[0] };
+  if (!isWidgetClass(c.classNode)) {
+    widgetMissing = { name: c.name, missing: "structural widget check" };
     continue;
   }
   widget = c;
   break;
 }
+if (process.env.MCODE_FIND_ANCHORS_DEBUG) {
+  process.stderr.write(`# DEBUG: total classes=${classes.length} widget=${widget?.name ?? "NONE"}\n`);
+  for (const c of classes) {
+    if (c.superClassName === "Xc") {
+      const classNode = c.classNode;
+      const ctor = classNode.body.body.find(m => m.type === "MethodDefinition" && m.kind === "constructor");
+      const params = ctor?.value?.type === "FunctionExpression"
+        ? ctor.value.params.filter(p => p.type === "Identifier").map(p => p.name)
+        : [];
+      const paramNames = new Set(params);
+      const assigned = new Set();
+      function visitDbg(x) {
+        if (!x || typeof x !== "object" || !x.type) return;
+        if (x.type === "AssignmentExpression" && x.operator === "=" && x.left.type === "MemberExpression" && !x.left.computed && x.left.object.type === "ThisExpression") {
+          if (x.right.type === "Identifier" && paramNames.has(x.right.name)) assigned.add(x.right.name);
+          else if (x.right.type === "MemberExpression" && !x.right.computed && x.right.object.type === "Identifier" && paramNames.has(x.right.object.name)) assigned.add(x.right.object.name);
+        }
+        for (const k of Object.keys(x)) {
+          if (k === "parent" || k === "loc" || k === "start" || k === "end") continue;
+          const v = x[k];
+          if (Array.isArray(v)) v.forEach(visitDbg);
+          else if (v && typeof v === "object") visitDbg(v);
+        }
+      }
+      if (ctor?.value?.body) visitDbg(ctor.value.body);
+      process.stderr.write(`# DEBUG: class=${c.name} super=${c.superClassName} params=${params.length} assigned=${assigned.size} superOK=${!!classNode.superClass} renderOK=${classNode.body.body.some(m => m.type === "MethodDefinition" && m.kind === "method" && m.key?.name === "render")} intervalOK=${nodeHas(classNode, isSetIntervalCall)}\n`);
+    }
+  }
+}
 if (!widget) {
   process.stderr.write(
-    `ERROR: no class has all 5 widget features (super + this.runtime= + this.requestRender= + this.statusLineItems= + setInterval)\n` +
-      (widgetMissing ? `  (last candidate '${widgetMissing.name}' missing: ${widgetMissing.missing})\n` : "") +
+    `ERROR: no class matches the structural widget check (super + render + setInterval + ctor assigns >= 2 ctor params to fields)\n` +
+      (widgetMissing ? `  (last candidate '${widgetMissing.name}' failed the structural check)\n` : "") +
       "\n",
   );
   process.exit(2);
@@ -210,6 +276,111 @@ if (widget.superClassName) {
   process.exit(2);
 }
 
+// ---- Discover widget property names (AST, not hardcoded) ----------------
+// The patch captures `this.<runtimeProp>` and `this.<shellStateProp>` so the
+// sidecar can read context/session. The names are not stable across mcode
+// versions, so we AST-walk the widget class for assignments of the form
+// `this.X = param.runtime` / `this.X = param`, where `param` is the first
+// constructor parameter. The X's become the discovered property names.
+const isFirstCtorParam = (n) => {
+  const ctor = widget.ctorMethod;
+  if (!ctor || ctor.value.type !== "FunctionExpression") return false;
+  const params = ctor.value.params;
+  return params.length > 0 && n === params[0];
+};
+const discoverPropNames = () => {
+  const ctor = widget.ctorMethod;
+  if (!ctor || ctor.value.type !== "FunctionExpression") return { runtimeProp: null, shellStateProp: null };
+  const ctorBody = ctor.value.body;
+  // The widget constructor may have multiple params; mcode's widget
+  // signature today is (shellState, runtime, requestRender). Scan all
+  // ctor params and collect every `this.X = param.Y` / `this.X = param`
+  // pair, keyed by param name.
+  const paramNames = new Set();
+  for (const p of ctor.value.params) {
+    if (p && p.type === "Identifier") paramNames.add(p.name);
+  }
+  const fieldPairs = [];   // [{thisProp, rhsFieldName}]
+  const selfPairs = [];    // [{thisProp, paramName}]
+  function visit(n) {
+    if (!n || typeof n !== "object" || !n.type) return;
+    if (n.type === "AssignmentExpression" &&
+        n.operator === "=" &&
+        n.left.type === "MemberExpression" &&
+        !n.left.computed &&
+        n.left.object.type === "ThisExpression" &&
+        n.left.property.type === "Identifier") {
+      const thisProp = n.left.property.name;
+      if (n.right.type === "MemberExpression" && !n.right.computed &&
+          n.right.object.type === "Identifier" &&
+          paramNames.has(n.right.object.name) &&
+          n.right.property.type === "Identifier") {
+        fieldPairs.push({ thisProp, rhsFieldName: n.right.property.name, paramName: n.right.object.name });
+      } else if (n.right.type === "Identifier" && paramNames.has(n.right.name)) {
+        selfPairs.push({ thisProp, paramName: n.right.name });
+      } else if (n.right.type === "LogicalExpression") {
+        visit(n.right.left); visit(n.right.right);
+      } else if (n.right.type === "ConditionalExpression") {
+        visit(n.right.consequent); visit(n.right.alternate);
+      }
+    }
+    for (const k of Object.keys(n)) {
+      if (k === "loc" || k === "start" || k === "end") continue;
+      const v = n[k];
+      if (Array.isArray(v)) v.forEach(visit);
+      else if (v && typeof v === "object") visit(v);
+    }
+  }
+  visit(ctorBody);
+
+  // shellState: a `this.X = <param>` (self-shape) assignment where X is one
+  // of the known shellState names. Fall back to PropertyDefinition
+  // initializers that name a ctor param.
+  let shellStateProp = null;
+  for (const pref of ["shellState", "_shellState", "shell", "state", "ctx", "context"]) {
+    const hit = selfPairs.find(p => p.thisProp === pref);
+    if (hit) { shellStateProp = hit.thisProp; break; }
+  }
+  if (!shellStateProp) {
+    for (const m of widget.classNode.body.body) {
+      if (m.type !== "PropertyDefinition") continue;
+      if (!m.key || m.key.type !== "Identifier") continue;
+      if (m.value && m.value.type === "Identifier" && paramNames.has(m.value.name)) {
+        shellStateProp = m.key.name; break;
+      }
+    }
+  }
+
+  // runtime: try self-shape first (param itself is the runtime object) then
+  // field-shape (param.<something>). The LHS thisProp is what the patcher
+  // needs; pick a known-good name if multiple candidates exist.
+  const runtimeNamePriority = ["runtime", "_runtime", "rt", "tu", "r", "context", "ctx"];
+  let runtimeProp = null;
+  for (const pref of runtimeNamePriority) {
+    const hit = selfPairs.find(p => p.thisProp === pref && p.thisProp !== shellStateProp);
+    if (hit) { runtimeProp = hit.thisProp; break; }
+  }
+  if (!runtimeProp) {
+    for (const pref of runtimeNamePriority) {
+      const hit = fieldPairs.find(p => p.rhsFieldName === pref && p.thisProp !== shellStateProp);
+      if (hit) { runtimeProp = hit.thisProp; break; }
+    }
+  }
+  if (!runtimeProp) {
+    for (const pref of runtimeNamePriority) {
+      const hit = fieldPairs.find(p => p.thisProp === pref && p.thisProp !== shellStateProp);
+      if (hit) { runtimeProp = hit.thisProp; break; }
+    }
+  }
+  if (!runtimeProp) {
+    for (const { thisProp } of [...selfPairs, ...fieldPairs]) {
+      if (thisProp !== shellStateProp) { runtimeProp = thisProp; break; }
+    }
+  }
+  return { runtimeProp, shellStateProp };
+};
+const { runtimeProp, shellStateProp } = discoverPropNames();
+
 // ---- Byte offsets --------------------------------------------------------
 const WIDGET_BODY_END = widget.classNode.end - 1;
 const CTOR_END = widget.ctorMethod.end - 1;
@@ -228,6 +399,8 @@ process.stdout.write(`WIDGET=${sq(widget.name)}\n`);
 process.stdout.write(`RENDER_METHOD_END=${RENDER_METHOD_END}\n`);
 process.stdout.write(`WIDGET_BODY_END=${WIDGET_BODY_END}\n`);
 process.stdout.write(`CTOR_END=${CTOR_END}\n`);
+process.stdout.write(`RUNTIME_PROP=${sq(runtimeProp || "")}\n`);
+process.stdout.write(`SHELLSTATE_PROP=${sq(shellStateProp || "")}\n`);
 if (baseIsExternal) {
   process.stdout.write(`# BASE is in another chunk; not patched (WIDGET alone is enough)\n`);
 } else {
@@ -235,4 +408,6 @@ if (baseIsExternal) {
 }
 process.stdout.write(`# Render method span: ${widget.renderMethod ? `${widget.renderMethod.start}..${widget.renderMethod.end}` : "(none, will be added by patcher)"}\n`);
 process.stdout.write(`# Constructor span: ${widget.ctorMethod.start}..${widget.ctorMethod.end}\n`);
+process.stdout.write(`# Discovered runtime prop: ${runtimeProp || "(none)"}\n`);
+process.stdout.write(`# Discovered shellState prop: ${shellStateProp || "(none)"}\n`);
 process.stdout.write(`# Total classes discovered: ${classes.length}\n`);

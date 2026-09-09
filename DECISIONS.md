@@ -36,6 +36,8 @@ CHANGELOG 讲**改了什么**。
 | D22 | 启动占位符 | 4 chunk 各自 `…` 占位，import 时 eager-start | 启动空白几行再冒数据 | v2.8.0 |
 | D23 | session fetch 并行 | `Promise.allSettled([runtime, sqlite])` | 串行（runtime 失败才走 sqlite） | v2.8.0 |
 | D24 | 分隔符/标签间距 | SEP 单空格、reset tail 单空格、`% 「」` 单空格 | 之前所有间距 2 空格 | v2.9.0 |
+| D25 | 注入逻辑去硬编码 | 5 特征 / 属性名 / SQL 列全 AST 化 + 容错链 + 升级回归 | 5 特征里有 3 个硬编码属性名；PATCH_RENDER / SQL 全硬编码 | v3.0.0 |
+| D26 | async 副作用必须挂 `.catch` | 同步 `try/catch` 抓不到 async reject；必须显式挂 `.catch(()=>{})` 让 Promise 永不能升级 unhandledRejection | v3.0.0 的 `getContextSnapshot()` 无参调用导致 mcode 0.3.10 `TUI stopped unexpectedly` | v3.0.1 |
 
 ---
 
@@ -388,6 +390,111 @@ doctor 22 项：200 列有明细 / 100 列有明细（新阈值 ≥80） / 上�
 **代价**：复杂度（两段独立判断、段 1 标签对齐用全宽空格）；段 2 永远 1 行的契约意味着
 极窄屏下必须牺牲上下文。
 
+### D25 — 注入逻辑去硬编码：AST 推断 + 容错链 + 升级回归
+
+**背景**：用户原话：「整理相关文档，脚本内容，并按照 ast 语法的角度进行注入逻辑的优化，
+sql 查询语句的优化，最终产出就算 mcode update 了之后，仍能够一定程度保持跟踪注入的方式。
+我们绝对不能把某些逻辑硬编码为正则匹配或者硬编码的逻辑，锁死在当前 mcode 版本上，
+一旦更新了就不能注入了。」
+
+**审计前**（v2.9）注入链里所有"假设 mcode 不变"的地方：
+
+| 位置 | 硬编码内容 | 风险 |
+|---|---|---|
+| `mcode-find-anchors.mjs` 5 特征 | `this.runtime =` / `this.requestRender =` / `this.statusLineItems =` | 3 个属性名都依赖 mcode 现状 |
+| `mcode-find-anchors.mjs` widget 识别 | 必须有本地 `render` 方法 | mcode widget 可继承基类的 `render`（实际就是） |
+| `mcode-patch-quota.mjs` `PATCH_RENDER` | 写死 `this.runtime` / `this.shellState` | 字段名变了注入就失效 |
+| `mcode-patch-quota.mjs` `SQLITE_SESSION_SQL` | 写死 `input_tokens` / `output_tokens` / ... 列名 | mcode 重命名列名 sqlite 查询就 0 行 |
+| `readContextUsage()` | 只读 `__mcodeShellState.contextUsage` | 旧 mcode 把 context 放在 runtime 上 |
+| `fetchSessionFromSqlite` | 已知 SQL + 已知列名 | 一次 schema 漂移就全 0 |
+
+**审计后**（v3.0）：
+
+| 位置 | 实现 | 抗漂移能力 |
+|---|---|---|
+| `mcode-find-anchors.mjs` widget 识别 | 三特征全结构化：super + setInterval + ctor ≥ 2 参数 ≥ 2 字段赋值 | mcode 改任何属性名都仍能识别 |
+| `mcode-find-anchors.mjs` 属性名推断 | 扫描 ctor `this.X = firstParam` / `this.X = firstParam.Y`，按候选优先级匹配 | mcode 改 1-2 个属性名仍正确 |
+| `mcode-patch-quota.mjs` `buildPatchRender(runtimeProp, shellStateProp)` | 接收推断出的属性名，拼接方法体 | 跟 finder 同步 |
+| `mcode-patch-quota.mjs` `resolveSqliteColumns(db)` + `buildSessionSql(cols)` | 运行时 `PRAGMA table_info` 拿实际列，按候选列表 `["input_tokens", "inputTokens", "input"]` 匹配 | mcode 改列名 / 拆表都自动适应 |
+| `readContextUsage()` fallback 链 | shellState.contextUsage → shellState.contextWindowTokens → runtime.getContextSnapshot | 老/新 mcode 都覆盖 |
+| `mcode-smoke.mjs` | 5 个模拟升级场景（字段改名 / 删字段 / 改 ctor）+ 1 个端到端 fork 重建 + 25 个断言 | 升级前可先 dry-run 验证 |
+
+**模拟场景实测**（`mcode-smoke.mjs` 全绿）：
+
+- 基线未改动 → finder 正确
+- `this.runtime` → `this.engine` 单字段重命名 → finder 自动发现 `RUNTIME_PROP=engine`
+- 三个 widget 字段全部重命名 → finder 仍正确
+- 删除 `statusLineItems` 赋值 → finder 仍正确
+- ctor 参数名 `t` → `ttx` 改名 → finder 仍正确
+- 完整 fork 重建（端到端）→ launcher 被 patch 上 `__mcodeQuotaRender` 且 `__mcodeShellState` / `__mcodeRuntime` 都被捕获
+
+**仍未完全解决**（用户原话"一定程度"已知上限）：
+
+- mcode 把 widget 移出 launcher-*.js chunk（patcher 找不到 launcher）—— 缓解：doctor
+  检查 launcher 是否在，且 mcode-find-anchors 失败时报清晰错误。
+- mcode 把 setInterval 改为 requestAnimationFrame / queueMicrotask —— 缓解：finder 现在
+  报告 5 个检测到的结构化特征，给升级时定位问题。
+- mcode 重构 widget 构造器、把 shell state 改为非首参数 —— finder 仍识别 widget 但
+  PATCH_RENDER 取错字段。缓解：mcode-smoke 会失败，要求人为更新。
+
+**关于文档**（用户原话第一句"整理相关文档"）：
+
+- 现状：README / ARCHITECTURE / MAINTENANCE / DECISIONS / CHANGELOG 共 5 份，无大块
+  重复。DECISIONS 是新增的"为什么"层，CHANGELOG 是"改了什么"层，两层分离。
+- 本次审计后，D25 把"硬编码 → AST 推断"的决策一次性写进 DECISIONS，避免后续维护者
+  把硬编码逻辑"修回去"。
+
+### D26 — 任何 async 副作用必须挂 `.catch(() => {})`
+
+**背景**：v3.0.0 在 `readContextUsage()` 同步路径里调了
+`runtime.getContextSnapshot()`（无参）。该 API 在 mcode 0.3.10 是 async，
+内部 `i.getSession({id:undefined})` 抛 `"Runtime did not return Session
+undefined."`，返回的 Promise 立即 reject。
+
+我们的同步 `try { return rt.getContextSnapshot() } catch { return null }`
+只能抓**同步** throw。async reject 逃逸后被 Node 升级成 `unhandledRejection`，
+mcode 0.3.10 进程级 handler（`e.once("unhandledRejection", u => c(m(u)))`）
+把进程带出 `TUI stopped unexpectedly: Session not found: undefined`。
+
+**规则**（推广到所有"sidecar 调 mcode 内部 API"的场景）：
+
+1. **有 sessionId 才调** —— 永远不要无参调 mcode runtime API。即使 sync 路径
+   里只是"试探一下"，也要先确认有合法入参。
+2. **如果调了，Promise 必挂 `.then(() => {}).catch(() => {})`** —— 哪怕不用
+   它的值。同步路径里"只采纳同步结果"只是说"用不用"，不是说"可以让 reject
+   逃逸"。
+3. **不要假设调用方会 `.catch` 我们的 Promise** —— Node 进程级 listener
+   （包括 mcode 自己装的）是兜底；sidecar 必须自包含。
+
+**反例（v3.0.0 之前）**：
+
+```js
+const snap = (() => {
+  try { return rt.getContextSnapshot(); }   // returns rejected Promise
+  catch { return null; }                     // never runs (no sync throw)
+})();
+```
+
+**正例（v3.0.1+）**：
+
+```js
+const sid = globalThis.__mcodeShellState?.agentSessionId || ...;
+if (sid && typeof rt?.getContextSnapshot === "function") {
+  try {
+    const maybe = rt.getContextSnapshot(sid);
+    if (maybe && typeof maybe.then === "function") {
+      maybe.then(() => {}).catch(() => {});   // <- critical line
+    }
+    if (maybe && typeof maybe === "object" && Number.isFinite(maybe.usedTokens)) {
+      cu = maybe;                              // sync adoption only
+    }
+  } catch {}
+}
+```
+
+**已波及**：`readContextUsage()` 全路径已审计。`fetchSessionOnce` 早就是 async
+函数 + `Promise.allSettled`，本身就 catch 所有 settle，**不受 D26 规则约束**。
+
 ## 3. 明确不做 / 否决清单
 
 | 事项 | 原因 |
@@ -412,6 +519,8 @@ doctor 22 项：200 列有明细 / 100 列有明细（新阈值 ≥80） / 上�
 | runtime 失败/全 0 才走 sqlite | 串行最坏 ~5s+50ms；改并行（先到先得）（D23） |
 | 误删 `上下文` 标签（v2.7） | 用户希望保留；v2.8 恢复（v2.7 误判） |
 | 之前所有间距都用 2 空格 | 段 1/段 2 各节省 8–12 列；用户要求"只要呼吸感"（D24） |
+| widget 字段 / SQL 列名 / 数据源位置硬编码 | mcode 升级会断；改 AST 推断 + 候选优先级 + 运行时容错链 + 升级回归测试（D25） |
+| 同步 `try/catch` 包住 async 调用 | 抓不到 reject；必须显式 `.then(()=>{}).catch(()=>{})` 让 Promise 不能升级 unhandledRejection（D26） |
 
 ### D19 — 段 1 增加「缓存命中」+「轮数」
 
