@@ -106,8 +106,8 @@ const C_LABEL   = "38;2;180;180;180";
 const MAX_BAR_WIDTH = 20;
 const MIN_BAR_WIDTH = 8;
 
-const L_LABEL_5H = "\u0035\u5c0f\u65f6\u4f7f\u7528\u91cf";      // 5小时使用量
-const L_LABEL_WEEK = "\u5468\u4f7f\u7528\u91cf";                  // 周使用量
+const L_LABEL_5H = "\u5c0f\u65f6\u4f1a\u8bdd\u7a97\u53e3";       // 小时会话窗口
+const L_LABEL_WEEK = "\u5468\u9650\u5236\u4f7f\u7528\u91cf";     // 周限制使用量
 const L_LABEL_SESSION = "\u4f1a\u8bdd tokens";                    // 会话 tokens
 const L_LEFT = "\u5269\u4f59";                                    // 剩余
 const L_RESET = "\u91cd\u7f6e";                                   // 重置
@@ -312,41 +312,57 @@ globalThis.__mcodeQuotaRender = function (width) {
     // 5h / week row builders. q* keeps reset times for stacked rows; q*h
     // drops them when the bars share a single row. labelWidth keeps the
     // 5h and 周 prefixes visually aligned when stacked.
-    const q5h = (bar) => renderOne(L_LABEL_5H, raw.dRem, "", bar, labelWidth);
-    const qwh = (bar) => renderOne(L_LABEL_WEEK, raw.wRem, "", bar, labelWidth);
     const q5  = (bar) => renderOne(L_LABEL_5H, raw.dRem, raw.dReset, bar, labelWidth);
     const qw  = (bar) => renderOne(L_LABEL_WEEK, raw.wRem, raw.wReset, bar, labelWidth);
 
     // Top section (token usage): one combined row when it fits, otherwise
-    // two stacked rows with aligned labels.
-    const topCombined = (bar) => q5h(bar) + SEP + qwh(bar);
+    // two stacked rows with aligned labels. Reset times are kept on every
+    // variant that fits — they tell the user when the bucket refreshes.
+    const topCombined = (bar) => q5(bar) + SEP + qw(bar);
     const topOneRow = fit(topCombined, width);
     let topRows;
     if (dw(topOneRow) <= width) {
       topRows = [topOneRow];
     } else {
-      // Reset times crowd very narrow terminals. Drop them and rely on the
-      // bar to convey status; below the 8-char bar floor the bar is already
-      // a sign that things are tight.
-      const q5n = (bar) => renderOne(L_LABEL_5H, raw.dRem, "", bar, labelWidth);
-      const qwn = (bar) => renderOne(L_LABEL_WEEK, raw.wRem, "", bar, labelWidth);
-      const stacked = [fit(q5n, width), fit(qwn, width)];
+      // Combined row with reset times overflows: try the stacked two-row
+      // form where each section gets its own row.
+      const stacked = [fit(q5, width), fit(qw, width)];
       if (stacked.every((r) => dw(r) <= width)) {
         topRows = stacked;
       } else {
-        // Truly tiny (< ~50): drop the percent to keep the bar visible.
-        // Walk through label padding and bar width together to find ANY
-        // rendering that fits, however degraded. The bar stays a bar — the
-        // label can be aggressively truncated.
-        let best = null;
-        for (const lw of [labelWidth, 4, 0]) {
-          const q5s = (bar) => label(L_LABEL_5H) + " " + buildBar(raw.dRem, bar).text;
-          const qws = (bar) => paddedLabel(L_LABEL_WEEK, lw) + " " + buildBar(raw.wRem, bar).text;
-          const rows = [fit(q5s, width), fit(qws, width)];
-          if (rows.every((r) => dw(r) <= width)) { topRows = rows; best = null; break; }
-          best = rows;
+        // Stacked with reset also overflows: drop reset times to gain room.
+        const q5n = (bar) => renderOne(L_LABEL_5H, raw.dRem, "", bar, labelWidth);
+        const qwn = (bar) => renderOne(L_LABEL_WEEK, raw.wRem, "", bar, labelWidth);
+        const stackedNoReset = [fit(q5n, width), fit(qwn, width)];
+        if (stackedNoReset.every((r) => dw(r) <= width)) {
+          topRows = stackedNoReset;
+        } else {
+          // Truly tiny (< ~50): drop the percent to keep the bar visible.
+          // Walk through label padding and bar width together to find ANY
+          // rendering that fits, however degraded. The bar stays a bar — the
+          // label can be aggressively truncated.
+          let best = null;
+          for (const lw of [labelWidth, 4, 0]) {
+            const q5s = (bar) => label(L_LABEL_5H) + " " + buildBar(raw.dRem, bar).text;
+            const qws = (bar) => paddedLabel(L_LABEL_WEEK, lw) + " " + buildBar(raw.wRem, bar).text;
+            const rows = [fit(q5s, width), fit(qws, width)];
+            if (rows.every((r) => dw(r) <= width)) { topRows = rows; best = null; break; }
+            best = rows;
+          }
+          if (best) topRows = best;
+          // Final fallback for sub-20-col: shrink the labels themselves.
+          if (topRows.some((r) => dw(r) > width)) {
+            for (const chars of [Math.max(2, Math.floor(width / 4)), 2, 1]) {
+              const trunc5 = L_LABEL_5H.slice(0, chars);
+              const truncW = L_LABEL_WEEK.slice(0, chars);
+              const q5s = (bar) => label(trunc5) + " " + buildBar(raw.dRem, bar).text;
+              const qws = (bar) => label(truncW) + " " + buildBar(raw.wRem, bar).text;
+              const rows = [fit(q5s, width), fit(qws, width)];
+              if (rows.every((r) => dw(r) <= width)) { topRows = rows; break; }
+              topRows = rows; // keep the most aggressive attempt as last resort
+            }
+          }
         }
-        if (best) topRows = best;
       }
     }
 

@@ -237,8 +237,8 @@ const TAIL_MODE = (() => {                                                      
 ### 7.5 文案
 
 ```js
-const L_LABEL_5H = "5小时使用量";
-const L_LABEL_WEEK = "周使用量";
+const L_LABEL_5H = "小时会话窗口";
+const L_LABEL_WEEK = "周限制使用量";
 const L_LABEL_SESSION = "会话 tokens";
 const L_CONTEXT = "上下文";        // 显示「已用/总量 百分比」，≥75% 暗橙、≥90% 暗红
 const L_IN = "输入";
