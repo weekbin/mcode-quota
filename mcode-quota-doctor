@@ -165,6 +165,16 @@ if [[ -f "$SIDECAR" ]]; then
   else
     warn "context usage chunk missing (expected 上下文 42K/200K 21%)"
   fi
+  if printf '%s' "$CLEAN" | grep -q "缓存命中"; then
+    ok "cache hit rate: $(printf '%s' "$CLEAN" | grep -o '缓存命中 [0-9]*%' | head -1)"
+  else
+    warn "cache hit rate missing (expected 缓存命中 NN%)"
+  fi
+  if printf '%s' "$CLEAN" | grep -q "轮数 "; then
+    ok "turn count: $(printf '%s' "$CLEAN" | grep -o '轮数 [0-9]*' | head -1)"
+  else
+    warn "turn count missing (expected 轮数 NN)"
+  fi
   if printf '%s' "$CLEAN" | grep -q "│"; then
     ok "separator is │ (U+2502)"
   else

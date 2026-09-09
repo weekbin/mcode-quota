@@ -91,7 +91,7 @@ const SESSION_TTL_MS = 10_000;
 const REFRESH_MIN_INTERVAL_MS = 500;
 
 let raw = { valid: false, dRem: null, dReset: "", wRem: null, wReset: "", fetchedAt: 0, lastSuccessAt: 0 };
-let session = { valid: false, total: 0, input: 0, output: 0, cache: 0, reasoning: 0, sessionId: null, fetchedAt: 0 };
+let session = { valid: false, total: 0, input: 0, output: 0, cache: 0, reasoning: 0, sessionId: null, fetchedAt: 0, turns: 0, cacheHit: null, source: null };
 let started = false;
 let sessionTimer = null;
 let lastRefreshAt = 0;
@@ -116,6 +116,8 @@ const L_IN = "\u8f93\u5165";                                      // 输入
 const L_OUT = "\u8f93\u51fa";                                     // 输出
 const L_CACHE = "\u7f13\u5b58";                                   // 缓存
 const L_CONTEXT = "\u4e0a\u4e0b\u6587";                           // 上下文
+const L_HIT = "\u7f13\u5b58\u547d\u4e2d";                         // 缓存命中
+const L_TURN = "\u8f6e\u6570";                                    // 轮数
 
 const ESC = "\\u001b[";
 const RESET_SEQ = ESC + C_RESET + "m";
@@ -251,6 +253,21 @@ function renderContextChunk() {
   return label(L_CONTEXT) + " " + amount + " " + ESC + col + "m" + c.pct + "%" + RESET_SEQ;
 }
 
+// Cache hit rate: how much of the prompt was served from the prompt cache.
+// ≥90% deep green, ≥70% muted green, otherwise amber.
+function renderCacheHitChunk() {
+  if (!session.valid || session.cacheHit == null) return null;
+  const pct = session.cacheHit * 100;
+  const col = pct >= 90 ? C_SUCCESS : pct >= 70 ? "38;2;140;170;90" : C_WARNING;
+  return label(L_HIT) + " " + ESC + col + "m" + Math.round(pct) + "%" + RESET_SEQ;
+}
+
+// Number of distinct turns in this session.
+function renderTurnCountChunk() {
+  if (!session.valid || !session.turns) return null;
+  return label(L_TURN) + " " + muted(String(session.turns));
+}
+
 const SEP = "  " + ESC + C_MUTED + "m\\u2502" + RESET_SEQ + "  ";
 const HORIZ_MIN_WIDTH = 110;
 const NARROW_MIN_WIDTH = 80;
@@ -366,43 +383,118 @@ globalThis.__mcodeQuotaRender = function (width) {
       }
     }
 
-    // Bottom section (会话 tokens [breakdown] │ 上下文).
+    // Top section (v2.5+): 会话 tokens [breakdown] │ 上下文 │ 缓存命中 │ 轮数
     //
-    // Two-row layout is the contract: this block always fits on ONE row.
-    // Show the breakdown only when the terminal is wide enough that
-    // it does not crowd the row — >= 80 cols by default. Below that, drop
-    // the breakdown first, then drop 上下文 if absolutely needed.
-    // 会话 tokens is the only piece we will not drop.
-    const DETAIL_MIN_WIDTH = 80;
-    const bottomRows = () => {
-      const sessionFull = renderSessionChunk(false);
-      const sessionCompact = renderSessionChunk(true);
-      const ctx = renderContextChunk();
-      const allowDetail = TAIL_MODE === "full" ||
-        (TAIL_MODE === "auto" && width >= DETAIL_MIN_WIDTH);
-      // Build candidates in priority order: most info first, but only
-      // include what fits. Then return the first that fits.
-      const tryList = [];
-      if (allowDetail && sessionFull && ctx) tryList.push(sessionFull + SEP + ctx);
-      if (sessionCompact && ctx) tryList.push(sessionCompact + SEP + ctx);
-      if (allowDetail && sessionFull) tryList.push(sessionFull);
-      if (sessionCompact) tryList.push(sessionCompact);
-      if (ctx) tryList.push(ctx);
-      for (const c of tryList) if (dw(c) <= width) return [c];
-      // Best effort: longest attempt even if it overflows.
-      return [tryList[0] || sessionFull || sessionCompact || ctx || ""];
+    // v2.6 contract: this block lives on ONE row at any width that can hold
+    // the smallest meaningful form (会话 + 上下文). Above that, append more
+    // detail chunks from the lowest-priority (most informative) end first.
+    //
+    // Priority order (most informative first; the first one that fits wins):
+    //   1. 会话[detail] │ 上下文 │ 缓存命中 │ 轮数
+    //   2. 会话[detail] │ 上下文 │ 缓存命中
+    //   3. 会话[detail] │ 上下文 │ 轮数
+    //   4. 会话[detail] │ 上下文
+    //   5. 会话[compact] │ 上下文 │ 缓存命中 │ 轮数
+    //   6. 会话[compact] │ 上下文 │ 缓存命中
+    //   7. 会话[compact] │ 上下文 │ 轮数
+    //   8. 会话[compact] │ 上下文
+    //   9. 会话[detail] (no 上下文)
+    //  10. 会话[compact] (no 上下文)
+    //  11. 上下文
+    //
+    // MCODE_QUOTA_TAIL:
+    //   full  — always allow detail (skip the compact-only candidates)
+    //   compact — never show detail
+    //   auto  — show detail only when the highest-priority candidate with
+    //           detail fits; fall back to compact otherwise
+    //
+    // If nothing fits, degrade to wrapping: try the most-informative form on
+    // its own line, then add the next chunk on a new line, etc. Only as a
+    // last resort.
+    const join = (...chunks) => chunks.filter(Boolean).join(SEP);
+    const sessionFull = renderSessionChunk(false);
+    const sessionCompact = renderSessionChunk(true);
+    const ctx = renderContextChunk();
+    const hit = renderCacheHitChunk();
+    const turn = renderTurnCountChunk();
+
+    const buildCandidates = (allowDetail) => {
+      const list = [];
+      if (allowDetail && sessionFull && ctx) {
+        list.push(join(sessionFull, ctx, hit, turn));
+        list.push(join(sessionFull, ctx, hit));
+        list.push(join(sessionFull, ctx, turn));
+        list.push(join(sessionFull, ctx));
+      }
+      if (sessionCompact && ctx) {
+        list.push(join(sessionCompact, ctx, hit, turn));
+        list.push(join(sessionCompact, ctx, hit));
+        list.push(join(sessionCompact, ctx, turn));
+        list.push(join(sessionCompact, ctx));
+      }
+      if (allowDetail && sessionFull) list.push(sessionFull);
+      if (sessionCompact) list.push(sessionCompact);
+      if (ctx) list.push(ctx);
+      return list;
     };
+
+    const topRowCandidates = (() => {
+      if (TAIL_MODE === "compact") return buildCandidates(false);
+      if (TAIL_MODE === "full") return buildCandidates(true);
+      // auto: prefer detail, but if detail doesn't fit (and ctx+hint doesn't
+      // fit either), still allow the compact candidates. We only drop
+      // detail if its highest-priority combined form overflows.
+      const detailList = buildCandidates(true);
+      const compactList = buildCandidates(false);
+      const detailFits = detailList.some((c) => dw(c) <= width);
+      return detailFits ? detailList : compactList;
+    })();
+
+    if (topRowCandidates.some((c) => dw(c) <= width)) {
+      // Pick the most-informative that fits on one row.
+      const fits = topRowCandidates.filter((c) => dw(c) <= width);
+      fits.sort((a, b) => dw(b) - dw(a));
+      lines.push(fits[0]);
+    } else {
+      // Nothing fits on one row: degrade to multi-line, most-informative
+      // first. The session chunk is mandatory; other chunks land on later
+      // lines if the terminal is too narrow for everything.
+      const coreLine = sessionFull || sessionCompact || ctx || "";
+      lines.push(coreLine);
+      const tailPieces = [ctx, hit, turn].filter(Boolean);
+      const used = coreLine;
+      let buf = "";
+      for (const p of tailPieces) {
+        const candidate = buf ? buf + SEP + p : p;
+        if (dw(candidate) <= width) {
+          buf = candidate;
+        } else {
+          if (buf) lines.push(buf);
+          buf = p;
+        }
+      }
+      if (buf && !lines.includes(buf)) lines.push(buf);
+    }
 
     // v2.5: section order swapped. 会话 tokens + 上下文 now lives on top
     // (closest to the mcode status bar); the token-usage bars (小时会话窗口
     // / 周限制使用量) are below.
-    const bottom = bottomRows();
-    if (bottom.length) lines.push(...bottom);
     lines.push(...topRows);
   } else {
     // No quota data: still surface 会话 tokens / 上下文 if available.
-    const tail = tailFor(width);
-    if (tail) lines.push(tail);
+    const join = (...chunks) => chunks.filter(Boolean).join(SEP);
+    const sessionFull = renderSessionChunk(false);
+    const sessionCompact = renderSessionChunk(true);
+    const ctx = renderContextChunk();
+    const hit = renderCacheHitChunk();
+    const turn = renderTurnCountChunk();
+    const tryList = [];
+    if (sessionFull && ctx) tryList.push(join(sessionFull, ctx, hit, turn));
+    if (sessionCompact && ctx) tryList.push(join(sessionCompact, ctx, hit, turn));
+    if (sessionFull) tryList.push(sessionFull);
+    if (sessionCompact) tryList.push(sessionCompact);
+    if (ctx) tryList.push(ctx);
+    for (const c of tryList) if (dw(c) <= width) { lines.push(c); break; }
   }
   // First render is a reliable "this is the real TUI" signal — start then.
   if (!started) start();
@@ -526,7 +618,7 @@ const SQLITE_SESSION_SQL = "SELECT " +
   "COALESCE(SUM(cache_read_tokens), 0) AS cacheReadTokens, " +
   "COALESCE(SUM(cache_write_tokens), 0) AS cacheWriteTokens, " +
   "COALESCE(SUM(cost_usd), 0) AS costUsd, " +
-  "COUNT(*) AS turns " +
+  "COUNT(DISTINCT turn_id) AS turns " +
   "FROM local_runtime_token_usage WHERE session_id = ?";
 
 let sqliteDb = null;
@@ -597,12 +689,17 @@ async function fetchSessionOnce() {
   const output = Number(summary.outputTokens ?? 0);
   const cache = Number(summary.cacheReadTokens ?? 0);
   const reasoning = Number(summary.reasoningTokens ?? 0);
+  // Cache hit rate: cache_read / (cache_read + fresh_input). A turn with
+  // zero fresh input and some cache_read is 100% hit; both zero = no data.
+  const hitDenom = cache + input;
+  const cacheHit = hitDenom > 0 ? cache / hitDenom : null;
   session = {
     valid: true,
     total: input + output + cache,
     input, output, cache, reasoning,
     sessionId,
     turns: Number(summary.turns ?? 0),
+    cacheHit,
     source,
     fetchedAt: Date.now(),
   };
