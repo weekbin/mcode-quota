@@ -2,6 +2,54 @@
 
 记录每次对工具集的修改。新条目加在最上面。
 
+## 2026-09-09 — v2.8.0：启动占位符 + session fetch 性能优化
+
+### 诉求
+
+> 我重启了，但是刚启动的时候内容显示不全，能不能考虑有展位的显示替代显示一下告知正在获取呢？或者 sql 查询相关的逻辑能不能优化一下，速度更快一点
+
+> 另外我发现，现在实际的展示效果里，上下文三个字没有了
+
+### 变更
+
+#### 1. 启动占位符
+
+- 新增 `pendingPlaceholders = { quota, session, context }`：每个数据源第一次填充时清除对应标志。
+- 渲染时若该数据源尚未填充，返回 `muted("标签 …")` 占位（例如 `会话 tokens …`、`上下文 …`）。
+- 第一次渲染就能看到**完整结构**（4 个 chunk 都在），不会像之前那样"先空白几行再逐个冒出来"造成视觉跳变。
+- 真实 pty 实测：前 ~500ms 显示 `会话 tokens … │ 上下文 … │ 缓存命中 … │ 轮数 …`，数据到位后无缝替换。
+
+#### 2. 启动时立即触发数据拉取
+
+- sidecar import 末尾新增 `queueMicrotask(() => start())`。
+- sidecar 只由 TUI 进程的 `cli.js` 静态 import，加载等同于「TUI 即将渲染」，立即拉取数据是安全的。
+- 旧逻辑：第一次 `__mcodeQuotaRender` 调用才触发 `start()`，fetch 是 async，所以前 1–3 帧数据都还没到。
+- 新逻辑：import 时就 fire 数据拉取，第一帧渲染时 fetches 已经在路上。
+
+#### 3. 渲染时 re-kick 会话拉取
+
+- TUI 的 widget.render 是在它**第一次真正渲染**时才通过 `globalThis.__mcodeShellState = ...` 暴露 `agentSessionId`。
+- 修复：sidecar 的 `__mcodeQuotaRender` 检测到 `agentSessionId` 首次出现时，立即重置 session cache 并 fire `fetchSessionOnce()`。
+- 之前是：sidecar 启动早于 TUI，所以 `fetchSessionOnce` 看到 `shell=null` 直接返回，要等 10s 定时器才再次尝试。
+
+#### 4. 上下文显示恢复 `上下文` 标签
+
+- v2.7 误删了 `上下文` 三个字，v2.8 恢复。
+- 现在格式：`上下文 21% 「42.0K/200.0K」`（标签 + 百分比前置 + 「」括号）。
+
+#### 5. session fetch 并行化（性能优化）
+
+- 之前：`getSessionUsageSummary` → 等结果 → 若空再走 sqlite（串行，最坏 ~5s+50ms）。
+- 现在：`Promise.allSettled([runtime, sqlite])` 并行跑，**先到的赢**，慢的那个结果丢弃。
+- 实测：sqlite 通常 50ms 内返回，runtime 有时更快；最坏情况下并行让首次 fetch 至少省 50ms。
+
+### 验证
+
+- 真实 pty 250 列：早期帧显示 `会话 tokens … │ 上下文 … │ 缓存命中 … │ 轮数 …`，数据到位后无缝替换
+- 22 项单元断言全绿
+- doctor 22 ok / 0 warn / 0 fail
+- 20–260 列扫描 0 溢出
+
 ## 2026-09-09 — v2.7.0：上下文显示格式优化 + 数字精度统一
 
 ### 诉求

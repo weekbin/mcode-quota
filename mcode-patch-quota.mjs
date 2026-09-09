@@ -95,6 +95,10 @@ let session = { valid: false, total: 0, input: 0, output: 0, cache: 0, reasoning
 let started = false;
 let sessionTimer = null;
 let lastRefreshAt = 0;
+// Track which data sources have not yet been filled on the first paint, so
+// the renderer can show a muted "…" placeholder instead of an empty cell.
+// Cleared as each fetch lands its first valid result.
+let pendingPlaceholders = { quota: true, session: true, context: true };
 
 const C_SUCCESS = "38;2;60;160;90";
 const C_WARNING = "38;2;200;150;40";
@@ -239,6 +243,7 @@ function readContextUsage() {
         ? sh.contextWindowTokens
         : null);
   if (!win) return null;
+  pendingPlaceholders.context = false;
   const used = Math.max(0, Math.min(cu.usedTokens, win));
   return { used, window: win, pct: Math.round((used / win) * 100) };
 }
@@ -249,11 +254,11 @@ function renderContextChunk() {
   // Mirrors mcode's own "Context N% left" thresholds, inverted to used-percent:
   // warn at 75% used, error at 90% used (25% / 10% left).
   const col = c.pct >= 90 ? C_ERROR : c.pct >= 75 ? C_WARNING : C_SUCCESS;
-  // Compact form: "51% 「259K/512K」" — percentage first, then the absolute
-  // numbers in full-width brackets. Drop the "上下文" label to save space and
-  // let the leading percent do the talking.
+  // "上下文 51% 「259.0K/512.0K」" — label + leading percent + absolute
+  // numbers in full-width brackets. Percent first so the eye reads the
+  // urgency before the magnitude.
   const amount = muted("「" + fmtTok(c.used) + "/" + fmtTok(c.window) + "」");
-  return ESC + col + "m" + c.pct + "%" + RESET_SEQ + " " + amount;
+  return label(L_CONTEXT) + " " + ESC + col + "m" + c.pct + "%" + RESET_SEQ + " " + amount;
 }
 
 // Cache hit rate: how much of the prompt was served from the prompt cache.
@@ -303,6 +308,18 @@ function fit(build, width) {
 
 globalThis.__mcodeQuotaRender = function (width) {
   if (width == null || !Number.isFinite(width) || width < 0) width = 0;
+  // Re-kick the session fetch when the TUI has just exposed its shellState
+  // for the first time. The eager-start from import time runs before the
+  // TUI has wired up globalThis.__mcodeShellState, so the first session
+  // fetch would no-op. The render hook below is when the shell becomes
+  // available, so we trigger a session fetch here.
+  if (globalThis.__mcodeShellState?.agentSessionId &&
+      (!session.sessionId || session.sessionId !== globalThis.__mcodeShellState.agentSessionId)) {
+    session = { ...session, sessionId: null, fetchedAt: 0 };
+    pendingPlaceholders.session = true;
+    // fire-and-forget; resolves into requestRefresh() once done
+    fetchSessionOnce();
+  }
   // 会话 tokens and 上下文 share one tail so either can render without the other.
   const buildTail = (compact) => {
     const parts = [renderSessionChunk(compact), renderContextChunk()].filter(Boolean);
@@ -415,11 +432,15 @@ globalThis.__mcodeQuotaRender = function (width) {
     // its own line, then add the next chunk on a new line, etc. Only as a
     // last resort.
     const join = (...chunks) => chunks.filter(Boolean).join(SEP);
-    const sessionFull = renderSessionChunk(false);
-    const sessionCompact = renderSessionChunk(true);
-    const ctx = renderContextChunk();
-    const hit = renderCacheHitChunk();
-    const turn = renderTurnCountChunk();
+    // Placeholder chunks for data sources that haven't filled yet. Cleared
+    // as each fetch lands (see fetchQuotaOnce / fetchSessionOnce /
+    // readContextUsage).
+    const placeholder = (label) => muted(label + " …");
+    const sessionFull = renderSessionChunk(false) || (pendingPlaceholders.session ? placeholder("会话 tokens") : null);
+    const sessionCompact = renderSessionChunk(true) || sessionFull;
+    const ctx = renderContextChunk() || (pendingPlaceholders.context ? placeholder("上下文") : null);
+    const hit = renderCacheHitChunk() || (pendingPlaceholders.session ? placeholder("缓存命中") : null);
+    const turn = renderTurnCountChunk() || (pendingPlaceholders.session ? placeholder("轮数") : null);
 
     const buildCandidates = (allowDetail) => {
       const list = [];
@@ -486,11 +507,12 @@ globalThis.__mcodeQuotaRender = function (width) {
   } else {
     // No quota data: still surface 会话 tokens / 上下文 if available.
     const join = (...chunks) => chunks.filter(Boolean).join(SEP);
-    const sessionFull = renderSessionChunk(false);
-    const sessionCompact = renderSessionChunk(true);
-    const ctx = renderContextChunk();
-    const hit = renderCacheHitChunk();
-    const turn = renderTurnCountChunk();
+    const placeholder = (label) => muted(label + " …");
+    const sessionFull = renderSessionChunk(false) || (pendingPlaceholders.session ? placeholder("会话 tokens") : null);
+    const sessionCompact = renderSessionChunk(true) || sessionFull;
+    const ctx = renderContextChunk() || (pendingPlaceholders.context ? placeholder("上下文") : null);
+    const hit = renderCacheHitChunk() || (pendingPlaceholders.session ? placeholder("缓存命中") : null);
+    const turn = renderTurnCountChunk() || (pendingPlaceholders.session ? placeholder("轮数") : null);
     const tryList = [];
     if (sessionFull && ctx) tryList.push(join(sessionFull, ctx, hit, turn));
     if (sessionCompact && ctx) tryList.push(join(sessionCompact, ctx, hit, turn));
@@ -595,6 +617,7 @@ const fetchQuotaOnce = async () => {
       fetchedAt: now,
       lastSuccessAt: g ? now : (raw.lastSuccessAt || 0),
     };
+    if (g) pendingPlaceholders.quota = false;
     mmxFailureCount = 0;
   } catch (e) {
     mmxFailureCount++;
@@ -665,24 +688,29 @@ async function fetchSessionOnce() {
   const sessionId = shell.agentSessionId;
   if (!sessionId) return;
   if (session.sessionId === sessionId && Date.now() - session.fetchedAt < SESSION_TTL_MS) return;
-  let summary = null;
-  let source = "runtime";
-  try {
-    const fn = runtime?.getSessionUsageSummary;
-    if (typeof fn === "function") {
+
+  // Race the runtime API and the sqlite fallback in parallel. The runtime
+  // call is in-process and usually fast but occasionally returns zeros
+  // (before the first turn is flushed); the sqlite query is the source of
+  // truth and always works, so whichever lands first wins, and the slower
+  // one's result is discarded.
+  const runtimeP = (async () => {
+    try {
+      const fn = runtime?.getSessionUsageSummary;
+      if (typeof fn !== "function") return null;
       const result = await Promise.resolve().then(() => fn.call(runtime, sessionId));
-      if (result && typeof result === "object") summary = result;
-    }
-  } catch {}
-  // The runtime API can report all-zero before a turn is flushed, or return
-  // an unexpected shape. Fall back to sqlite whenever it holds real numbers.
-  if (!summary || sumTotal(summary) === 0) {
-    const fb = await fetchSessionFromSqlite(sessionId);
-    if (fb && (!summary || sumTotal(fb) > 0)) {
-      summary = fb;
-      source = "sqlite";
-    }
-  }
+      if (result && typeof result === "object" && sumTotal(result) > 0) return result;
+    } catch {}
+    return null;
+  })();
+  const sqliteP = fetchSessionFromSqlite(sessionId);
+  const [runtimeRes, sqliteRes] = await Promise.allSettled([runtimeP, sqliteP]);
+  const fromRuntime = runtimeRes.status === "fulfilled" ? runtimeRes.value : null;
+  const fromSqlite = sqliteRes.status === "fulfilled" ? sqliteRes.value : null;
+  // Prefer the runtime value when both have real numbers; otherwise use
+  // whichever is non-empty.
+  const summary = fromRuntime || fromSqlite;
+  const source = fromRuntime ? "runtime" : (fromSqlite ? "sqlite" : null);
   if (!summary) {
     session = { ...session, sessionId, fetchedAt: Date.now() };
     requestRefresh();
@@ -706,6 +734,7 @@ async function fetchSessionOnce() {
     source,
     fetchedAt: Date.now(),
   };
+  pendingPlaceholders.session = false;
   requestRefresh();
 }
 
@@ -727,6 +756,16 @@ function start() {
 }
 
 globalThis.__mcodeQuotaStart = start;
+
+// Eager kick. The sidecar is only ever loaded by the fork's cli.js, which
+// is itself only loaded by the TUI entry — so it is safe to fire the
+// pollers at import time, not just on first render. This closes the gap
+// where the very first 1-3 frames would have rendered with raw.valid=false
+// and session.valid=false, showing "0 of 0%" / "0%" placeholders. The first
+// fetch still takes ~50ms (sqlite) to ~5s (mmx); until it lands, the
+// renderer shows muted "…" placeholders so the user sees structure, not
+// emptiness.
+queueMicrotask(() => { try { start(); } catch {} });
 `;
 
 // ============================================================================

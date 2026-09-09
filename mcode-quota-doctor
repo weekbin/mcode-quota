@@ -160,10 +160,10 @@ if [[ -f "$SIDECAR" ]]; then
   else
     warn "breakdown missing at 100 cols (>= 80 threshold should keep it)"
   fi
-  if printf '%s' "$CLEAN" | grep -q "21% 「42.0K/200.0K」"; then
-    ok "context usage: $(printf '%s' "$CLEAN" | grep -o '[0-9]*% 「[^」]*」' | head -1)"
+  if printf '%s' "$CLEAN" | grep -q "上下文 21% 「42.0K/200.0K」"; then
+    ok "context usage: $(printf '%s' "$CLEAN" | grep -o '上下文 \S*21% 「[^」]*」' | head -1)"
   else
-    warn "context usage chunk missing (expected 21% 「42.0K/200.0K」)"
+    warn "context usage chunk missing (expected 上下文 21% 「42.0K/200.0K」)"
   fi
   if printf '%s' "$CLEAN" | grep -q "缓存命中"; then
     ok "cache hit rate: $(printf '%s' "$CLEAN" | grep -o '缓存命中 [0-9]*%' | head -1)"
