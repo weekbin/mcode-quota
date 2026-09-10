@@ -232,41 +232,41 @@ function paddedLabel(text, labelWidth) {
 // numbers shown in the status bar: 4.3M / 42.0K / 217.8M / 618 (no unit). The
 // trailing ".0" is kept on K/M values so the column width does not jump
 // when a counter crosses a power of ten (e.g. 9.9K -> 10.0K vs 9.9K -> 10K).
-// v3.2.2: 通用 K / M / B / T 短档（US finance / tech 通用）。
+// v3.2.3: 通用 K / M / B / T 短档（US finance / tech 通用），精度 2 位小数。
 //   1e3 → K, 1e6 → M, 1e9 → B, 1e12 → T
-// 关键：1_000_000_000 = 1.0B（不是 1000.0M）—— 1000M 是老写法的 ugly 副产物。
+// 关键：1_000_000_000 = 1.00B（不是 1000.00M）—— 1000M 是老写法的 ugly 副产物。
 // 同时 M 不再吞 B 范围：≥ 1e9 一律走 B，避免 4 位数 + M 这种 5 字符挤位。
 //
-// 边界 round-up：JS 浮点会让 999_999_999/1e6.toFixed(1) 输出 "1000.0M"。
-// 在每个档位都做一次"如果这一档的 toFixed(1) 会跨档则向上提一档"的处理。
-// 阈值 999.95（不是 1000.0）以保证 toFixed 不会"用进位"撞到下一档字面值。
-// .0 后缀保留（K/M/B/T 全部）以保证列宽在跨档时稳定。
+// 边界 round-up：JS 浮点会让 999_999_999/1e6.toFixed(2) 输出 "1000.00M"。
+// 在每个档位都做一次"如果这一档 toFixed(2) 会跨档则向上提一档"的处理。
+// 阈值 999.995（不是 1000.0）以保证 toFixed 不会"用进位"撞到下一档字面值。
+// 整数（< 1e3）和百分比单独处理，不走这个函数。
 const fmtTok = (n) => {
   if (!Number.isFinite(n)) return "0";
   // T
   if (n >= 1_000_000_000_000) {
-    return (n / 1_000_000_000_000).toFixed(1) + "T";
+    return (n / 1_000_000_000_000).toFixed(2) + "T";
   }
-  // B; threshold for "B would round up to 1000.0B" → bump to T is n >= 999.95e9
+  // B; threshold for "B would round up to 1000.00B" → bump to T is n >= 999.995e9
   if (n >= 1_000_000_000) {
-    if (n >= 999_950_000_000) {
-      return (Math.round(n / 100_000_000_000) / 10).toFixed(1) + "T";
+    if (n >= 999_995_000_000) {
+      return (Math.round(n / 10_000_000_000) / 100).toFixed(2) + "T";
     }
-    return (n / 1_000_000_000).toFixed(1) + "B";
+    return (n / 1_000_000_000).toFixed(2) + "B";
   }
-  // M; threshold for "M would round up to 1000.0M" → bump to B is n >= 999.95e6
+  // M; threshold for "M would round up to 1000.00M" → bump to B is n >= 999.995e6
   if (n >= 1_000_000) {
-    if (n >= 999_950_000) {
-      return (Math.round(n / 100_000_000) / 10).toFixed(1) + "B";
+    if (n >= 999_995_000) {
+      return (Math.round(n / 10_000_000) / 100).toFixed(2) + "B";
     }
-    return (n / 1_000_000).toFixed(1) + "M";
+    return (n / 1_000_000).toFixed(2) + "M";
   }
-  // K; threshold for "K would round up to 1000.0K" → bump to M is n >= 999.95e3
+  // K; threshold for "K would round up to 1000.00K" → bump to M is n >= 999.995e3
   if (n >= 1_000) {
-    if (n >= 999_950) {
-      return (Math.round(n / 100_000) / 10).toFixed(1) + "M";
+    if (n >= 999_995) {
+      return (Math.round(n / 10_000) / 100).toFixed(2) + "M";
     }
-    return (n / 1_000).toFixed(1) + "K";
+    return (n / 1_000).toFixed(2) + "K";
   }
   return String(n);
 };
