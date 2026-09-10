@@ -236,6 +236,46 @@ try {
   } else {
     console.log("  WARN: cli.js not present in fork (fork-only verification skipped)");
   }
+
+  // ---- shortenModelName regression (v3.2.1) ----
+  // Custom model names (GGUF filenames, fine-tunes, "expires-on-NNNN"
+  // aliases) regularly exceed 30 chars. The renderer must middle-ellipsise
+  // them so a 56-char filename doesn't blow the row width.
+  // We verify (a) the source defines the helper with the right contract
+  // and (b) the function behaves as designed against a corpus of real
+  // custom names. The behavioural run uses a tiny `new Function` sandbox
+  // to evaluate just the function body — no need to import the full
+  // sidecar ESM (which has top-level await and sqlite imports).
+  console.log("\n[scenario] shortenModelName: long custom names get middle-ellipsis");
+  const sidecarSrc = readFileSync(join(PROJECT_ROOT, "sidecar/mcode-quota-fetcher-9f8a7b.mjs"), "utf-8");
+  check(/function shortenModelName\s*\(/.test(sidecarSrc), "sidecar defines shortenModelName");
+  check(/MAX_MODEL_NAME_CHARS\s*=\s*32/.test(sidecarSrc), "sidecar caps at 32 chars");
+  check(/ELLIPSIS\s*=\s*"\u2026"/.test(sidecarSrc), "sidecar uses U+2026 ellipsis (not '...')");
+  check(/shortenModelName\(it\.model\)/.test(sidecarSrc), "renderTodayByModelRow applies shortenModelName to every item");
+  // Behavioural run — extract the function body, run against a corpus.
+  const fnBody = sidecarSrc.match(/function shortenModelName\([^)]*\)\s*\{[\s\S]*?\n\}/);
+  if (fnBody) {
+    const fn = new Function(`
+      const ELLIPSIS = "\\u2026";
+      const MAX_MODEL_NAME_CHARS = 32;
+      ${fnBody[0]}
+      return shortenModelName;
+    `)();
+    const corpus = [
+      ["MiniMax-M3", 10],                                  // short: unchanged
+      ["deepseek-v4.1-flash-expires-on-0910", 32],         // 35→32
+      ["Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive-Q4_K_M.gguf", 32],
+      ["MiniCPM5-1B-Claude-Opus-Fable5-V2-Thinking", 32],
+      ["x".repeat(32), 32],                                 // exactly at limit
+      ["x".repeat(100), 32],                                // way over
+    ];
+    for (const [input, expectedLen] of corpus) {
+      const got = fn(input);
+      check(got.length === expectedLen, `truncate ${input.length}c → ${expectedLen}c (got ${got.length}c)`);
+    }
+  } else {
+    fail++; console.log("  FAIL: could not extract shortenModelName from sidecar source");
+  }
 } finally {
   for (const d of tempDirs) { try { rmSync(d, { recursive: true, force: true }); } catch {} }
 }

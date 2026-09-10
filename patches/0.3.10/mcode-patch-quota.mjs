@@ -131,6 +131,19 @@ const L_HIT = "\u7f13\u5b58\u547d\u4e2d";                         // 缓存命�
 const L_TURN = "\u8f6e\u6570";                                    // 轮数
 const L_TODAY = "\u4eca\u65e5";                                   // 今日
 
+// v3.2.1: model name 中间省略。Model 名是运行时写入的，没规范化 — 用户的
+// GGUF 文件名 / 自定义 fine-tune 名经常超过 30 字符。超过 MAX_MODEL_NAME_CHARS
+// 时保留前 60% + 「…」 + 后 40%，让 family 名（开头）和版本/量化（结尾）都还能看到。
+const MAX_MODEL_NAME_CHARS = 32;
+const ELLIPSIS = "\u2026";
+function shortenModelName(name) {
+  if (!name || name.length <= MAX_MODEL_NAME_CHARS) return name;
+  // head = 60% of budget, tail = 40% of budget, -1 for the ellipsis
+  const tail = Math.max(4, Math.floor(MAX_MODEL_NAME_CHARS * 0.4));
+  const head = MAX_MODEL_NAME_CHARS - tail - 1;
+  return name.slice(0, head) + ELLIPSIS + name.slice(name.length - tail);
+}
+
 const ESC = "\\u001b[";
 const RESET_SEQ = ESC + C_RESET + "m";
 
@@ -955,8 +968,10 @@ function renderTodayByModelRow(width) {
   const items = visible.slice(0, maxN);
   const buildOne = (it) => {
     // 「model」 total — model in muted CJK brackets, total in the same
-    // success-green family as 会话 tokens for visual consistency.
-    const modelStr = it.model;
+    // success-green family as 会话 tokens for visual consistency. Long
+    // custom model names (GGUF filenames, fine-tunes) are middle-ellipsised
+    // by shortenModelName so a 56-char filename doesn't blow the row width.
+    const modelStr = shortenModelName(it.model);
     const totalStr = fmtTok(it.total);
     return "\u300c" + label(modelStr) + "\u300d " + ESC + C_SUCCESS + "m" + totalStr + RESET_SEQ;
   };

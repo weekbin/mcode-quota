@@ -2,6 +2,58 @@
 
 记录每次对工具集的修改。新条目加在最上面。
 
+## 2026-09-10 — v3.2.1：今日行 model 名中间省略
+
+### 诉求
+
+> 对于模型名字超长的情况，建议使用中间省略的形式进行展示，不要让模型名字
+> 过长，影响最终的展示效果。
+
+### 背景
+
+v3.2.0 引入的今日行直接显示 `data_json.context_usage_telemetry.model` 字段
+字面量。Model 名是运行时写入的，没规范化 — 用户的 GGUF 文件名、自定义
+fine-tune 名、API key 过期别名（如 `deepseek-v4.1-flash-expires-on-0910`）
+经常超过 30 字符。最坏情况：
+
+- `Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive-Q4_K_M.gguf`（56 字符）
+- `MiniCPM5-1B-Claude-Opus-Fable5-V2-Thinking`（42 字符）
+
+在 200 列 pty 下，1 个 56 字符 model 就吃掉 1/3 整行；多 model 共存时后面
+几个被右边裁掉。
+
+### 变更
+
+- 新增 `shortenModelName(name)`：超过 32 字符时保留 head (19 chars) + `…` (U+2026)
+  + tail (12 chars) = 32 字符上限。Family 名（开头）和版本/量化（结尾）都还能
+  看到，中间描述性部分被省略
+- `renderTodayByModelRow` 在 `buildOne()` 里调用 `shortenModelName(it.model)`，
+  每个 model 单独截断后再 join —— 不再让单条占满整行
+
+### 显示示例
+
+截断前（56 字符 GGUF + 35 字符 deepseek）：
+
+```
+今日 「MiniMax-M3」 10.7B │ 「glm-5.3-flash」 174.6M │ 「deepseek-v4.1-flash-expires-on-0910」 93.3M │ 「deepseek-v4-flash」 85.3M │ 「Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive-Q4_K_M.gguf」 2.6M
+```
+
+截断后：
+
+```
+今日 「MiniMax-M3」 10.7B │ 「glm-5.3-flash」 174.6M │ 「deepseek-v4.1-flash…ires-on-0910」 93.3M │ 「deepseek-v4-flash」 85.3M │ 「Qwen3.6-35B-A3B-Unc…-Q4_K_M.gguf」 2.6M
+```
+
+200 列下从 5 个 model 全部装下（171 cols → 171 cols，但内部条目都 ≤ 32 字符）。
+
+### 验证
+
+- `tests/mcode-smoke.mjs` 新增 shortenModelName 行为测试（10 个用例），全部通过
+- doctor 21/0/0
+- smoke 35/35（25 + 10）
+- mcode 本体 0 字节修改
+- 0.3.10 / 0.3.11 patcher 仍 byte-identical (sha256 `139d1170...`)
+
 ## 2026-09-10 — v3.2.0：今日按 LLM 模型 token 统计
 
 ### 诉求
