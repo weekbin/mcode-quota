@@ -35,3 +35,12 @@
 
 - `getContextSnapshot()` 旧版 mcode 接受 sync 调用，新版必传 sessionId 且返回 Promise；
   patcher 已通过 `sid` 守卫 + `.then(()=>{}).catch(()=>{})` 兜底（D26）。
+
+## 文件 sha256
+
+```
+06adb531dbc90864cc3a4b1ce0c16342963ba471b2edb950efc704f195b8f85a  mcode-patch-quota.mjs
+b2940f549ccfd703fd3938294c1c492d7dae61c1776b21bcfe1368263398d022  mcode-find-anchors.mjs
+```
+
+未来分叉时这里改成新 hash 并标注"diverged from 0.3.10 @ <old sha>"。

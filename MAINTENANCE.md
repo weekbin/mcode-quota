@@ -209,7 +209,7 @@ mcodex 走 fallback 分支跑**未打 patch 的官方 mcode**（不卡你）。
 验证：
 
 ```bash
-node mcode-patch-quota.mjs --fork-base=... --sidecar=... --current=<版本> --offline
+node patches/_loader.mjs --fork-base=... --sidecar=... --current=<版本> --offline
 node --check ~/.local/share/mcode-quota/mcode-clone/<版本>/code/chunks/launcher-*.js
 ```
 

@@ -42,3 +42,13 @@
 - 0.3.10 → 0.3.11 升级时 mcode 本体 launcher 改了 127 KB 但 widget 偏移未变 —— 这说明
   finder 抓的 `WIDGET_BODY_END` 是稳定锚点，patcher 注入位置不会因 chunk 改动而漂移。
 - 同 D26：`getContextSnapshot` 必须接 `.catch(()=>{})` 兜底。
+
+## 文件 sha256
+
+```
+06adb531dbc90864cc3a4b1ce0c16342963ba471b2edb950efc704f195b8f85a  mcode-patch-quota.mjs
+b2940f549ccfd703fd3938294c1c492d7dae61c1776b21bcfe1368263398d022  mcode-find-anchors.mjs
+```
+
+**与 0.3.10 完全相同**（byte-identical）—— 证明 widget 自身没改，patcher 可共用。
+未来分叉时这里改成新 hash 并标注"diverged from 0.3.10 @ <old sha>"。
