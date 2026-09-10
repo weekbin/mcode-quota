@@ -244,6 +244,44 @@ mcode 升级后：
 如果 mcode 大重构导致锚点找不到，patcher 会明确报错并**回退到未打 patch 的官方 mcode**
 （`mcodex` 的 fallback 分支），不会把你卡住。
 
+### 5.1 patches/ 版本目录机制（v3.1 起）
+
+> **问题**：v3.0 之前 patcher 是单文件（`mcode-patch-quota.mjs`），当 mcode 升级改了 widget
+> 字段后，**老用户拉最新 master 会拿到新版 patcher，但他们的 mcode 是老版**——AST 推断的
+> 候选优先级是基于新版决策的，可能对老版不是最优解；严重时甚至不能正确注入。
+> 此外排查问题的时候，老 commit 的 patcher 代码和当时跑的 mcode 之间的对应关系被 git history
+> 拉平了，不直观。
+
+**方案**：
+
+```
+patches/
+├── _loader.mjs              # dispatcher：按 --current 选目录
+├── 0.3.10/                  # mcode 0.3.10 的 patcher
+│   ├── mcode-patch-quota.mjs
+│   ├── mcode-find-anchors.mjs
+│   └── NOTES.md             # 该版本检测到的 widget 签名 + 决策
+└── 0.3.11/                  # mcode 0.3.11 的 patcher
+    └── ...
+```
+
+`patches/_loader.mjs` 的解析规则：
+
+1. 优先用 `patches/<请求版本>/` 精确匹配
+2. 没有精确匹配则选**最高 <= 请求版本**的目录（X.Y.Z 字典序 = 数值序）
+3. 都没有 → 报错并列出可用版本
+
+`mcodex` 调 `patches/_loader.mjs` 而不是直接的 `mcode-patch-quota.mjs`，**老目录的 patcher
+代码不被任何东西覆盖**。新 mcode 改了 widget → 只需在 `patches/0.3.12/` 加新 patcher
+（或把现有最新版复制过来再改），loader 自动选。
+
+**对 git history 的影响**：每个 mcode 版本的 patcher 决策可以独立 commit、单独回滚、
+单独看 diff；不会因为单文件历史而把"0.3.10 时怎么做"和"0.3.12 时怎么做"挤到同一根 branch
+上。
+
+**对 doctor 的影响**：新增 `versioned patches available:` 和 `loader picks patches/X/`
+两行，明示当前 mcode 走了哪个 patch 目录、是否有 fallback。
+
 ## 6. 已知限制
 
 - fork 每个版本占约 62MB（真实拷贝，换来无 realpath 陷阱）

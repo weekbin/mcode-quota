@@ -9,6 +9,10 @@
 #     spawns and was the root cause of the earlier process storm.
 #   * The sidecar does not auto-start; its pollers start on the first status
 #     line render, i.e. only in the real TUI process.
+#   * The patcher is dispatched through patches/_loader.mjs, which picks
+#     patches/<version>/mcode-patch-quota.mjs based on the installed mcode
+#     version. If the exact version is not present, the loader falls back
+#     to the closest patches/<v>/ with v <= current (see DECISIONS D27).
 #
 # Usage:
 #   mcodex [mcode args...]
@@ -58,7 +62,9 @@ if [[ "${MCODE_QUOTA_OFFLINE:-0}" == "1" ]]; then
 fi
 
 PATCH_ERR=""
-if ! PATCH_ERR="$("$NODE_BIN" "$QUOTA_DIR/mcode-patch-quota.mjs" "${PATCH_ARGS[@]}" 2>&1 1>/dev/null)"; then
+# Dispatch through patches/_loader.mjs — it picks patches/<version>/ based
+# on --current, falling back to the closest available <= requested.
+if ! PATCH_ERR="$("$NODE_BIN" "$QUOTA_DIR/patches/_loader.mjs" "${PATCH_ARGS[@]}" 2>&1 1>/dev/null)"; then
   echo "mcodex: quota patcher failed — launching plain mcode" >&2
   echo "$PATCH_ERR" >&2
   exec "$SRC_LAUNCHER_FILE" "$@"

@@ -16,14 +16,14 @@
 // The mcode source itself never changes; the mutations live in /tmp.
 
 import { execFileSync, spawnSync } from "node:child_process";
-import { copyFileSync, readFileSync, writeFileSync, mkdtempSync, rmSync, existsSync } from "node:fs";
+import { copyFileSync, readFileSync, writeFileSync, mkdtempSync, rmSync, existsSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const FINDER = join(__dirname, "mcode-find-anchors.mjs");
-const PATCHER = join(__dirname, "mcode-patch-quota.mjs");
+const PROJECT_ROOT = dirname(__dirname);              // .../mcode-quota
+const PATCHES_DIR = join(PROJECT_ROOT, "patches");
 
 let pass = 0, fail = 0;
 const check = (cond, label, extra) => {
@@ -31,10 +31,55 @@ const check = (cond, label, extra) => {
   else { fail++; console.log(`  FAIL: ${label}${extra ? " — " + extra : ""}`); }
 };
 
-const LIVE_LAUNCHER = process.env.MCODE_LAUNCHER
-  || `${process.env.HOME}/.local/share/mcode-quota/mcode-clone/0.3.10/code/chunks/launcher-CVR77P3I.js`;
-if (!existsSync(LIVE_LAUNCHER)) {
-  console.error(`FATAL: live launcher not found at ${LIVE_LAUNCHER}; set MCODE_LAUNCHER env`);
+// Auto-discover the live launcher under the fork base. We prefer the
+// current mcode version (per the symlink file at ~/.minimax-code/current);
+// otherwise we pick the highest <version>/ under the fork base.
+const discoverLiveLauncher = () => {
+  const base = `${process.env.HOME}/.local/share/mcode-quota/mcode-clone`;
+  const current = (() => {
+    try { return readFileSync(`${process.env.HOME}/.minimax-code/current`, "utf-8").trim(); }
+    catch { return null; }
+  })();
+  const tryRead = (version) => {
+    try {
+      const dir = `${base}/${version}/code/chunks`;
+      const files = readdirSync(dir);
+      return files.find((f) => /^launcher-.*\.js$/.test(f)) ? `${dir}/${files.find((f) => /^launcher-.*\.js$/.test(f))}` : null;
+    } catch { return null; }
+  };
+  if (current && tryRead(current)) return tryRead(current);
+  // Fallback: pick the highest version under base/
+  try {
+    const versions = readdirSync(base).filter((d) => /^\d+\.\d+\.\d+$/.test(d)).sort((a, b) => {
+      const [a1,a2,a3] = a.split(".").map(Number), [b1,b2,b3] = b.split(".").map(Number);
+      return (b1-b1)||(b2-a2)||(b3-a3);
+    });
+    for (const v of versions) { const p = tryRead(v); if (p) return p; }
+  } catch {}
+  return null;
+};
+
+const LIVE_LAUNCHER = process.env.MCODE_LAUNCHER || discoverLiveLauncher();
+if (!LIVE_LAUNCHER) {
+  console.error(`FATAL: no live launcher found under ~/.local/share/mcode-quota/mcode-clone/; set MCODE_LAUNCHER env`);
+  process.exit(2);
+}
+console.log(`# using live launcher: ${LIVE_LAUNCHER}`);
+
+// Extract the mcode version from the live launcher path, then resolve
+// the versioned finder/patcher under patches/<version>/. This keeps the
+// smoke aligned with the loader's resolution order without hard-coding
+// a version here.
+const mcodeVersion = (() => {
+  const m = LIVE_LAUNCHER.match(/\/mcode-clone\/(\d+\.\d+\.\d+)\//);
+  if (m) return m[1];
+  throw new Error(`could not extract mcode version from ${LIVE_LAUNCHER}`);
+})();
+const PATCH_DIR = join(PATCHES_DIR, mcodeVersion);
+const FINDER = join(PATCH_DIR, "mcode-find-anchors.mjs");
+const PATCHER = join(PATCH_DIR, "mcode-patch-quota.mjs");
+if (!existsSync(PATCH_DIR)) {
+  console.error(`FATAL: no patches/${mcodeVersion}/ for the live launcher; run mcodex once to build it, or add the version.`);
   process.exit(2);
 }
 
@@ -165,15 +210,16 @@ try {
   const forkDir = mkdtempSync(join(tmpdir(), "mcode-fork-"));
   tempDirs.push(forkDir);
   // copy from the official install into the fork root
-  const src = process.env.MCODE_SRC || `${process.env.HOME}/.minimax-code/releases/0.3.10`;
+  const src = process.env.MCODE_SRC
+    || `${process.env.HOME}/.minimax-code/releases/${mcodeVersion}`;
   execFileSync(process.execPath, [PATCHER,
     "--src=" + src,
     "--fork-base=" + forkDir,
-    "--sidecar=" + join(__dirname, "sidecar/mcode-quota-fetcher-9f8a7b.mjs"),
-    "--current=0.3.10",
+    "--sidecar=" + join(PROJECT_ROOT, "sidecar/mcode-quota-fetcher-9f8a7b.mjs"),
+    "--current=" + mcodeVersion,
     "--offline",
   ], { stdio: "inherit" });
-  const patched = join(forkDir, "0.3.10/code/chunks");
+  const patched = join(forkDir, `${mcodeVersion}/code/chunks`);
   const files = execFileSync("ls", [patched], { encoding: "utf-8" });
   const launcher = files.split("\n").find((f) => /^launcher-.*\.js$/.test(f));
   check(!!launcher, "fork contains a launcher-*.js chunk");
@@ -183,7 +229,7 @@ try {
     check(content.includes("__mcodeShellState"), "fork launcher captures __mcodeShellState");
     check(content.includes("__mcodeRuntime"), "fork launcher captures __mcodeRuntime");
   }
-  const cli = join(forkDir, "0.3.10/code/cli.js");
+  const cli = join(forkDir, `${mcodeVersion}/code/cli.js`);
   if (existsSync(cli)) {
     const c = readFileSync(cli, "utf-8");
     check(c.includes("mcode-quota-sidecar"), "fork cli.js imports the sidecar");

@@ -38,6 +38,7 @@ CHANGELOG 讲**改了什么**。
 | D24 | 分隔符/标签间距 | SEP 单空格、reset tail 单空格、`% 「」` 单空格 | 之前所有间距 2 空格 | v2.9.0 |
 | D25 | 注入逻辑去硬编码 | 5 特征 / 属性名 / SQL 列全 AST 化 + 容错链 + 升级回归 | 5 特征里有 3 个硬编码属性名；PATCH_RENDER / SQL 全硬编码 | v3.0.0 |
 | D26 | async 副作用必须挂 `.catch` | 同步 `try/catch` 抓不到 async reject；必须显式挂 `.catch(()=>{})` 让 Promise 永不能升级 unhandledRejection | v3.0.0 的 `getContextSnapshot()` 无参调用导致 mcode 0.3.10 `TUI stopped unexpectedly` | v3.0.1 |
+| D27 | patcher 按 mcode 版本分目录 | `patches/<v>/mcode-patch-quota.mjs` + `_loader.mjs` 按 `--current` 选目录，找不到精确匹配时回退到最近 `<=` 版本 | 单 patcher 文件让"老 mcode 用户拉新 master"不匹配、git history 把 0.3.10/0.3.11 决策混在一根 branch | v3.1.0 |
 
 ---
 
@@ -494,6 +495,68 @@ if (sid && typeof rt?.getContextSnapshot === "function") {
 
 **已波及**：`readContextUsage()` 全路径已审计。`fetchSessionOnce` 早就是 async
 函数 + `Promise.allSettled`，本身就 catch 所有 settle，**不受 D26 规则约束**。
+
+### D27 — patcher 按 mcode 版本分目录
+
+**背景**：v3.0 之前 `mcode-patch-quota.mjs` 是单文件根目录的 patcher。mcode 升级
+改 widget 字段后会出现两个问题：
+
+1. **老用户拉最新 master 会拿到基于新 mcode 决策的 patcher**，但他们跑的是老 mcode
+   —— AST 候选优先级是基于新 widget 决策的，对老 widget 不是最优；严重时不能正确注入。
+2. **git history 不可读**：排查"当时 mcode 0.3.10 的 patcher 是怎么写的"得手动找 commit，
+   而且单文件的所有改动挤在一条 branch 上。
+
+**方案**：
+
+```
+patches/
+├── _loader.mjs              # 按 --current 选 patches/<v>/
+├── 0.3.10/                  # mcode 0.3.10 适配（NOTES.md + finder + patcher）
+└── 0.3.11/                  # mcode 0.3.11 适配（与 0.3.10 同源；未来若分叉则独立）
+```
+
+`patches/_loader.mjs` 的解析规则：
+
+1. 优先 `patches/<请求版本>/` 精确匹配
+2. 没有则选**最高 `<=` 请求版本**的目录（X.Y.Z 字典序 = 数值序）
+3. 都没有 → 报错并列出可用版本
+
+`mcodex` 调 `_loader.mjs` 而不是直接的 patcher。**老目录的 patcher 代码不被任何东西
+覆盖** —— 新 mcode 改了 widget 只需在 `patches/0.3.12/` 加新 patcher（或拷最新版再改），
+loader 自动选；老用户继续拿老 patcher 跑。
+
+**NOTES.md 每个版本目录都有一份**，记录：
+
+- 该版本检测到的 widget AST 签名（class / super / 字段名 / 偏移）
+- 与上一版的差异（哪些字段 / 偏移 / 决策变了）
+- 已知问题（与该 mcode 版本绑定）
+
+**git history 影响**：每个 mcode 版本的 patcher 决策可以独立 commit、单独回滚、单独看
+diff；不会因为单文件历史而把"0.3.10 时怎么做"和"0.3.12 时怎么做"挤到同一根 branch 上。
+
+**doctor 影响**：新增 `versioned patches available:` 和 `loader picks patches/X/`（精确
+匹配或 `<=` fallback）两行，明示当前 mcode 走了哪个 patch 目录、是否有 fallback。
+
+**对同步的影响**：`mcodex-push-remote` 不变；patches/ 目录随 master 一起推到 GitHub
+私有 mirror。老用户从 GitHub clone 后 `patches/<他们的 mcode 版本>/` 自然可用。
+
+**对回滚的影响**：如果新 mcode 改得 patcher 完全不能工作，老用户只需 `git checkout
+<上一个好的 commit>` 即可，patches/ 目录会回到那个 commit 的状态，自动用对应版本的
+patcher。
+
+**未做**：
+
+- ❌ patcher 之间共享代码（用 `_shared/` 之类的目录）。理由：每个版本的 patcher 是
+  独立 snapshot，共享会引入跨版本耦合；当前 0.3.10 / 0.3.11 字节级相同也没合并。
+- ❌ 自动检测 mcode 版本 + 自动 clone patches/ 模板。理由：版本目录本质是代码决策
+  的版本化，不应该自动生成 —— 自动生成会失去"人 review 决策"的机会。
+
+**已波及**：
+
+- `mcodex` 调 `patches/_loader.mjs`（原调 `mcode-patch-quota.mjs`）
+- `mcode-quota-doctor` 加 loader 选择行（精确 vs fallback）
+- `tests/mcode-smoke.mjs` 从 live launcher 路径推断 mcode 版本，自动选对应 patches/ 目录
+- `mcodex-push-remote` 不变（patches/ 在仓库根下，自动随同步走）
 
 ## 3. 明确不做 / 否决清单
 

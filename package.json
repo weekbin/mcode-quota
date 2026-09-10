@@ -1,18 +1,33 @@
 {
   "name": "mcode-quota",
-  "version": "3.0.0",
+  "version": "3.1.0",
   "description": "mcodex — fork-isolated quota + session token status bar for mcode",
-  "main": "mcode-patch-quota.mjs",
-  "scripts": {
-    "find-anchors": "node mcode-find-anchors.mjs",
-    "patch": "node mcode-patch-quota.mjs",
-    "doctor": "./mcode-quota-doctor"
-  },
   "type": "module",
+  "bin": {
+    "mcodex": "./mcodex",
+    "mcode-quota-doctor": "./mcode-quota-doctor"
+  },
+  "scripts": {
+    "patch": "node patches/_loader.mjs",
+    "find-anchors": "node patches/_loader.mjs --current=0.3.11",
+    "doctor": "./mcode-quota-doctor",
+    "smoke": "node tests/mcode-smoke.mjs",
+    "push-remote": "./mcodex-push-remote"
+  },
+  "files": [
+    "mcodex",
+    "mcode-quota-doctor",
+    "mcodex-push-remote",
+    "patches/",
+    "tests/",
+    "package.json",
+    "README.md",
+    "ARCHITECTURE.md",
+    "MAINTENANCE.md",
+    "CHANGELOG.md",
+    "DECISIONS.md"
+  ],
   "dependencies": {
     "acorn": "^8.18.0"
-  },
-  "bin": {
-    "mcode-patch-quota": "mcode-patch-quota.mjs"
   }
 }

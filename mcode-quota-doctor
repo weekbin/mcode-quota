@@ -12,6 +12,8 @@ QUOTA_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CODE_ROOT="${MCODE_CODE_ROOT:-$HOME/.minimax-code}"
 FORK_BASE="${MCODE_QUOTA_FORK_DIR:-$HOME/.local/share/mcode-quota/mcode-clone}"
 SIDECAR="$QUOTA_DIR/sidecar/mcode-quota-fetcher-9f8a7b.mjs"
+PATCHES_DIR="$QUOTA_DIR/patches"
+LOADER="$PATCHES_DIR/_loader.mjs"
 
 PASS=0
 FAIL=0
@@ -30,6 +32,38 @@ if [[ -f "$CURRENT_FILE" ]]; then
 else
   fail "mcode current pointer missing: $CURRENT_FILE"
   echo; echo "  Fix: install mcode first, or set MCODE_CODE_ROOT."; exit 2
+fi
+
+# 1b. versioned patcher selection — visible which patches/<v>/ is in use
+if [[ -d "$PATCHES_DIR" ]]; then
+  AVAILABLE_PATCHES="$(find "$PATCHES_DIR" -maxdepth 1 -mindepth 1 -type d -printf '%f\n' 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tr '\n' ' ')"
+  if [[ -n "$AVAILABLE_PATCHES" ]]; then
+    ok "versioned patches available: $AVAILABLE_PATCHES"
+    # Resolve which one the loader would pick for the current mcode version.
+    CHOSEN="$(printf '%s\n' $AVAILABLE_PATCHES | awk -v cur="$CURRENT_VERSION" '
+      function cmp(a,b,  i,aa,bb) { split(a,aa,"."); split(b,bb,"."); for(i=1;i<=3;i++){if(aa[i]+0!=bb[i]+0) return aa[i]+0-bb[i]+0} return 0 }
+      BEGIN { best="" }
+      { if (cmp($0,cur) <= 0 && (best=="" || cmp($0,best) > 0)) best=$0 }
+      END { print best }')"
+    if [[ -n "$CHOSEN" ]]; then
+      if [[ "$CHOSEN" == "$CURRENT_VERSION" ]]; then
+        ok "loader picks patches/$CHOSEN/ (exact match)"
+      else
+        warn "loader will pick patches/$CHOSEN/ (closest <= for mcode $CURRENT_VERSION)"
+      fi
+    else
+      fail "no patches/<v>/ with v <= $CURRENT_VERSION; available: $AVAILABLE_PATCHES"
+    fi
+  else
+    fail "patches/ has no versioned subdirectories (expected patches/<x.y.z>/)"
+  fi
+  if [[ -f "$LOADER" ]]; then
+    ok "loader present: patches/_loader.mjs"
+  else
+    fail "loader missing: $LOADER"
+  fi
+else
+  fail "patches/ directory missing: $PATCHES_DIR"
 fi
 
 SRC_CODE="$CODE_ROOT/releases/$CURRENT_VERSION/lib/node_modules/@minimax-ai/code"

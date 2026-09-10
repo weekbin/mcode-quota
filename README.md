@@ -39,8 +39,10 @@ mcodex --help
 
 `mcodex` 做的事：
 1. 读 `~/.minimax-code/current` 拿当前版本
-2. 跑 `mcode-patch-quota.mjs`（幂等，已就绪时 <1s）
+2. 跑 `patches/_loader.mjs`（幂等，已就绪时 <1s）—— loader 选 `patches/<当前 mcode 版本>/mcode-patch-quota.mjs`
 3. `exec <mcode 官方 node> <fork>/code/cli.js "$@"`
+
+**找不到精确版本时**（比如新版 mcode 刚发布还没建 patches/ 目录）—— loader 自动回退到**最接近的 `<=` 版本**，并打 stderr 警告；老用户继续可用。
 
 patcher 失败时自动回退到**未打 patch 的官方 mcode**，不会卡住你。
 
@@ -116,10 +118,19 @@ patcher 失败时自动回退到**未打 patch 的官方 mcode**，不会卡住�
 ```
 /home/weekbin/orca/projects/mcode/mcode-quota/   # 工具集（git 仓库，single source of truth）
 ├── mcodex                       # 入口 wrapper
-├── mcode-patch-quota.mjs        # 构建 fork + 打 patch + 生成 sidecar
-├── mcode-find-anchors.mjs       # acorn AST 锚点发现器
 ├── mcode-quota-doctor           # 自检（22 项）
-├── sidecar/                     # patcher 生成的 sidecar（不要手改）
+├── mcodex-push-remote           # GitHub 私有 mirror 同步
+├── patches/                     # 按 mcode 版本分目录的 patcher
+│   ├── _loader.mjs              #   按 --current 选 patches/<v>/
+│   ├── 0.3.10/                  #   mcode 0.3.10 适配
+│   │   ├── mcode-patch-quota.mjs
+│   │   ├── mcode-find-anchors.mjs
+│   │   └── NOTES.md             #   该版本的 widget 签名 / 决策 / 已知问题
+│   └── 0.3.11/                  #   mcode 0.3.11 适配（与 0.3.10 同源）
+├── tests/                       # 升级漂移回归
+│   ├── mcode-smoke.mjs          #   5 模拟升级场景 + 25 断言
+│   └── README.md
+├── sidecar/                     # patcher 生成的 sidecar（不要手改，gitignore）
 └── README / ARCHITECTURE / DECISIONS / MAINTENANCE / CHANGELOG
 
 ~/.minimax/bin/mcodex                                            # PATH 入口（250 字节 stub）
@@ -127,6 +138,8 @@ patcher 失败时自动回退到**未打 patch 的官方 mcode**，不会卡住�
 ~/.local/share/mcode-quota/mcode-clone/.pristine-<版本>/         # 解压出的纯净源码
 ~/.local/share/mcode-quota/mcode-clone/<版本>/code/              # 打了 patch 的 fork
 ```
+
+**版本目录机制**：每个 mcode 版本有自己的 `patches/<v>/` 目录。当 mcode 升级改了 widget 字段时，**只在新版本目录里改 patcher** —— 老目录保持不变，老用户继续拿老 patcher 跑（`mcodex-push-remote` 同步和回滚都不受影响）。loader 不知道 mcode 长啥样，它只看版本号字符串。
 
 ## 安装 / 使用
 

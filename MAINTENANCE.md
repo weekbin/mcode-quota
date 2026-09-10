@@ -134,7 +134,8 @@ MCODE_QUOTA_OFFLINE=1 mcodex    # 只用已缓存 tarball 或已安装源码，�
 patcher 报 `anchor finder failed` / `anchor parse failed` 时：
 
 ```bash
-node /home/weekbin/orca/projects/mcode/mcode-quota/mcode-find-anchors.mjs \
+MCODE_FIND_ANCHORS_DEBUG=1 \
+node /home/weekbin/orca/projects/mcode/mcode-quota/patches/<当前版本>/mcode-find-anchors.mjs \
      ~/.local/share/mcode-quota/mcode-clone/<版本>/code/chunks/launcher-*.js
 ```
 
@@ -146,13 +147,61 @@ WIDGET='jf'
 RENDER_METHOD_END=824661
 WIDGET_BODY_END=824662
 CTOR_END=823576
+RUNTIME_PROP='runtime'
+SHELLSTATE_PROP='shellState'
 ```
 
-`mcode-find-anchors.mjs` 的匹配特征（`WIDGET`）：
+`mcode-find-anchors.mjs` 的匹配特征（`WIDGET`，v3.0 起改为 AST 推断）：
 
-- `class extends <Base>`
-- 构造体含 `super(`、`this.runtime`、`this.requestRender`、`this.shellState`、`setInterval`
-- 类体最后一个成员是 `render`
+- 存在 `super()` 调用
+- 类体内有 `setInterval(...)` 调用（widget 唯一稳定的结构信号）
+- 构造器接收 ≥ 2 个参数，并将其中的 ≥ 2 个赋给 `this.X` 字段
+- 字段名按候选优先级推断（`runtime > _runtime > rt > tu > r > context > ctx`）
+
+不需要 `render` 方法存在（widget 可继承基类 render）。
+
+## 5.5 加新 mcode 版本（patcher 跟随升级）
+
+mcode 升级后 mcodex 跑得起来不代表 patcher 是最优的。当以下任一情况发生时
+（应该都能从 mcode-find-anchors 输出看出来）：
+
+- `WIDGET_BODY_END` / `CTOR_END` 偏移变了
+- `RUNTIME_PROP` / `SHELLSTATE_PROP` 名字变了
+- 构造器参数个数变了
+- widget 类名变了
+
+**操作**：
+
+```bash
+# 1. 在 patches/ 下建新版本目录
+NEW="0.3.12"
+mkdir -p "patches/$NEW"
+cp patches/0.3.11/mcode-patch-quota.mjs  "patches/$NEW/"
+cp patches/0.3.11/mcode-find-anchors.mjs "patches/$NEW/"
+
+# 2. 跑 mcode 0.3.12 实际 launcher，验证 finder 还能识别
+MCODE_FIND_ANCHORS_DEBUG=1 \
+  node patches/$NEW/mcode-find-anchors.mjs \
+       ~/.local/share/mcode-quota/mcode-clone/$NEW/code/chunks/launcher-*.js
+
+# 3. 起一次 mcodex，确认 fork 注入成功
+mcodex --help
+mcode-quota-doctor
+
+# 4. 跑回归
+node tests/mcode-smoke.mjs
+
+# 5. 写 patches/$NEW/NOTES.md，记录该版本与上一版的差异
+# 6. commit + push
+./mcodex-push-remote
+```
+
+**如果 patcher 不需要改**（widget 字段和偏移都没变，比如 0.3.10 → 0.3.11），
+loader 也能直接走老目录——`patches/0.3.11/` 自动成为 0.3.12 的 fallback。
+但建议还是建 `patches/0.3.12/` 并 NOTES 里说"与 0.3.11 同源"，便于回溯。
+
+**如果没建新目录 + 也没老目录 <= 当前版本**，loader 报错并列出可用版本，
+mcodex 走 fallback 分支跑**未打 patch 的官方 mcode**（不卡你）。
 
 如果 mcode 改了这些特征，需要更新 `mcode-find-anchors.mjs` 里的特征列表。
 **patcher 本体不需要改** —— 它只消费 `WIDGET_BODY_END` / `CTOR_END` 两个偏移。

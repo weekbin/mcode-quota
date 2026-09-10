@@ -2,6 +2,78 @@
 
 记录每次对工具集的修改。新条目加在最上面。
 
+## 2026-09-10 — v3.1.0：patches/ 版本目录机制 + 测试目录化
+
+### 动机
+
+> 整理优化当前的相关文档和脚本，将状态调整到最佳，然后同步到远程仓库中。
+> 另外注意好 mcode 版本的跟踪，即从 0.3.10 开始，如果每个版本的 patch 方式或者
+> 脚本有变动，应该有对应的目录做区分，方便回溯问题，或者给老版本的用户安装体验。
+
+v3.0 之前 patcher 是单文件（`mcode-patch-quota.mjs`），mcode 升级改 widget 后
+老用户拉 master 会拿到不匹配的 patcher 决策。v3.1 引入**按 mcode 版本分目录的 patcher
+仓库**，从 0.3.10 起每个版本都有独立的 finder / patcher / NOTES.md，loader 按
+`--current` 选目录，找不到精确匹配时回退到最近 `<=` 版本（D27）。
+
+### 变更
+
+#### 1. 目录重构
+
+```
+mcode-quota/
+├── mcodex                       # 改调 patches/_loader.mjs
+├── mcode-quota-doctor           # 新增 versioned patches / loader picks 行
+├── patches/                     # 新：按 mcode 版本分目录
+│   ├── _loader.mjs
+│   ├── 0.3.10/                  # finder + patcher + NOTES.md
+│   └── 0.3.11/
+├── tests/                       # 从根移过来
+│   ├── mcode-smoke.mjs
+│   └── README.md
+├── README / ARCHITECTURE / MAINTENANCE / DECISIONS / CHANGELOG
+└── package.json (3.1.0)
+```
+
+老 patcher / finder 从根目录消失，逻辑上 1:1 搬到 `patches/0.3.10/` 和 `patches/0.3.11/`。
+**两个版本的 patcher 当前字节级相同**（widget 字段未改），但作为独立目录存储 —— 未来
+分叉时各自演进。
+
+#### 2. patches/_loader.mjs
+
+- 读 `--current=<version>` from argv
+- `patches/<v>/` 精确匹配 → 用
+- 否则选**最高 `<=`** 请求版本的目录（X.Y.Z 字典序 = 数值序）
+- 都没有 → 报错并列出可用版本；`mcodex` 走 fallback 分支跑未打 patch 的官方 mcode
+
+#### 3. tests/ 目录化
+
+- `mcode-smoke.mjs` 从根移过来；自动从 live launcher 路径推断 mcode 版本，自动选
+  对应 `patches/<v>/` 的 finder / patcher
+- 加 `tests/README.md` 说明各场景
+
+#### 4. 文档
+
+- `ARCHITECTURE.md` §5.1 patches/ 调度 + 版本目录
+- `MAINTENANCE.md` §5.5 "加新 mcode 版本" 流程
+- `DECISIONS.md` D27（含未做清单）
+- `README.md` 文件树 + 入口描述更新
+- `package.json` 3.1.0，bin 指向实际入口脚本
+
+### 兼容性
+
+- 老的 `mcodex` 路径（直接调 `mcode-patch-quota.mjs`）不再可用 —— mcodex 已经
+  重写为调 loader，外部脚本若有人 hardcode 旧路径会断
+- 老的 `mcode-find-anchors.mjs` / `mcode-patch-quota.mjs` 在根目录的引用全部失效
+- `mcodex-push-remote` 不变
+
+### 验证
+
+- `mcode-quota-doctor` 22/0/0，新加 `versioned patches available: 0.3.10 0.3.11` 行
+  和 `loader picks patches/0.3.11/ (exact match)`
+- `node tests/mcode-smoke.mjs` 25/25 pass
+- loader 三种路径全过：精确匹配（0.3.11）/ 回退（0.3.12 → 0.3.11）/ 太老报错（0.3.9）
+- mcode 本体 0 字节修改（fork 隔离仍成立）
+
 ## 2026-09-09 — v3.0.2：双端备份（GitHub 私有 mirror）
 
 - 新建 GitHub 私有仓库 `weekbin/mcode-quota`（默认分支 `master`）
