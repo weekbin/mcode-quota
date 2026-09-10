@@ -457,34 +457,12 @@ globalThis.__mcodeQuotaRender = function (width) {
       }
     }
 
-    // v3.2: 4-chunk row (会话 tokens / 上下文 / 缓存命中 / 轮数) was
-    // removed to make room for the today-by-model row. mcode's render
-    // framework clips the widget's return array to 2 elements total
-    // (1 super status line + 1 of ours). The user explicitly chose
-    // (5h/week + today) over (4-chunk + 5h/week) — see D28.
-    //
-    // Layout strategy: append the today row as a SEP-joined suffix to
-    // the 5h/周 combined row when wide enough; otherwise show only the
-    // 5h/周 row (today silently degrades). The today row was originally
-    // requested as a separate row "下方" of 5h/周, but the framework
-    // limit forced this compromise — same data, same color, just
-    // on the same visual line as 5h/周.
-    //
-    // The chunk builders are kept below in case the layout is re-extended
-    // in the future — see renderSessionChunk / renderContextChunk etc.
-
-    // v2.5: token-usage bars (小时会话窗口 / 周限制使用量) live on top
-    // (closest to the mcode status bar). On wide screens they share one
-    // v2.5 section order: 4-chunk row (会话 tokens + 上下文 + 缓存命中
-    // + 轮数) on top, then 5h/周 bars. v3.2 added 今日 (per-LLM-model
-    // totals) on a third row below 5h/周.
-    //
-    // The mcode framework can render any number of our elements (verified
-    // with 3 of our lines on a 140-col pty), so we keep all three rows
-    // as separate visual lines.
-
-    // v3.2: 4-chunk row (会话 tokens [breakdown] │ 上下文 │ 缓存命中 │ 轮数)
-    //   Restored from v3.1.0. MCODE_QUOTA_TAIL controls breakdown visibility.
+    // v3.2: 3 independent lines — 4-chunk / 5h/周 / 今日. Order top-to-bottom
+    // matches the v3.1.0 layout (会话上下文 in the most-prominent slot,
+    // quota bars hugging mcode's status bar, today's LLM-by-model stats at
+    // the bottom). mcode's launcher framework actually accepts any number of
+    // elements; the v3.2.0 first ship mistakenly merged 5h/周+今日 into one
+    // line based on a stderr-debug misread — see DECISIONS D28.
     const join = (...chunks) => chunks.filter(Boolean).join(SEP);
     const placeholder = (label) => muted(label + " …");
     const sessionFull = renderSessionChunk(false) || (pendingPlaceholders.session ? placeholder("会话 tokens") : null);

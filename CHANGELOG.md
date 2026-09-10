@@ -56,9 +56,18 @@
 
 - 真实 pty 200 列：4-chunk / 5h/周 / 今日 3 行各自 re-paint（25s 抓到 ~30 帧）
 - 单元 test：`__mcodeQuotaRender(200)` 5 帧连测均返 3 元素
-- doctor 19/0/0
+- doctor 21/0/0（含新增的 `4-chunk present` 和 `3 lines painted` 检查）
 - smoke 25/25
 - mcode 本体 0 字节修改
+
+### 后续整理（5d2beaf 后的 review pass）
+
+- patcher 内遗留首版 ship 时的旧注释（"framework clips to 2 elements"）已替换
+  为 v3.2.0 重做后的注释
+- `DECISIONS.md` 顶部摘要表里的 D28 旧描述已跟新 D28 详细段对齐
+- `patches/<v>/NOTES.md` sha256 重新 pin 到清理后的 `0428cc6c14...`（D27 byte-identical 保持）
+- `README.md` 顶部"效果"小节从 2 行结构更新为 3 行结构；
+  数据源表新增"今日 按 LLM 模型"行
 
 ## 2026-09-10 — v3.1.0：patches/ 版本目录机制 + 测试目录化
 

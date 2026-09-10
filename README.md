@@ -48,43 +48,51 @@ patcher 失败时自动回退到**未打 patch 的官方 mcode**，不会卡住�
 
 ## 效果
 
-**始终 2 行结构**（极窄屏退化 3 行）：
+**3 行结构**（v3.2.0）：
 
-- **第 1 行：会话 tokens + 上下文** — 紧贴 mcode 状态栏（`~/... │ ◇ Greeting │ ⎇ master │ ✦ model`）的下一行。
-  承载**当前会话**累计 token 与上下文窗口用量，跟 mcode 自身状态最相关。明细用全角引号
-  包住：`「输入 │ 输出 │ 缓存」`。
-- **第 2 行：token usage** — 独立成行，承载配额（小时会话窗口 / 周限制使用量）剩余百分比与重置时间。
+- **第 1 行：4-chunk** — 紧贴 mcode 状态栏，承载**当前会话**的 4 类独立数据：
+  `会话 tokens X.XM 「输入 │ 输出 │ 缓存」 │ 上下文 N% 「X/Y」 │ 缓存命中 N% │ 轮数 N`。
+  4 类都是独立维度，全部保留（v3.2.0 首版 ship 曾合并/删除 4-chunk，用户反馈后恢复）。
+- **第 2 行：5h/周** — 独立成行，承载配额（小时会话窗口 / 周限制使用量）剩余百分比与重置时间。
   标签**字数一致**（都是 6 字 / 12 列），天然对齐。宽屏 1 行带两组重置，窄屏拆 2 行每行带重置。
+- **第 3 行：今日 按 LLM 模型** — 独立成行，承载**今日**用过的 LLM 模型及对应 token 总量。
+  数据源 `local_runtime_message_rows.data_json.context_usage_telemetry.model` 关联到
+  `local_runtime_token_usage.turn_id`（`token_usage.model` 列在 0.3.11 始终为 NULL）。
+  60s 轮询，跨日自动刷新。响应式 top-N（5/3/1 by width）。
 
-**宽屏（≥140 列，例 250 列）** — 2 行，会话 tokens 在上、token usage 在下，段 1 展示 4 个 chunk：
+**宽屏（≥140 列，例 200 列）** — 3 行：
 
 ```
-会话 tokens 24.9K 「输入 550 │ 输出 95 │ 缓存 24.3K」  │  5% 「24.9K/512.0K」  │  缓存命中 98%  │  轮数 1
-小时会话窗口 [███████████████████░] 97% 剩余  │ 重置 4h 5m  │  周限制使用量 [████████████████░░░░] 82% 剩余  │ 重置 4d 13h
+会话 tokens 152.3M 「输入 1.3M │ 输出 366.2K │ 缓存 150.6M」 │ 上下文 28% 「145.0K/512.0K」 │ 缓存命中 99% │ 轮数 984
+小时会话窗口 [████████░░░░░░░░░░░░] 41% 剩余  │ 重置 3h 1m  │  周限制使用量 [██████████████████░░] 92% 剩余  │ 重置 3d 7h
+今日 「MiniMax-M3」 867.4M
 ```
 
-**中屏（100–139 列）** — 2 行，token usage 拆 2 行（每行带重置），段 1 显明细但去轮数：
+**中屏（100–139 列）** — 3 行，token usage 拆 2 行（每行带重置），段 1 显明细但去轮数，今日多模型（如有）降为 top-3：
 
 ```
 会话 tokens 24.9K 「输入 550 │ 输出 95 │ 缓存 24.3K」  │  5% 「24.9K/512.0K」  │  缓存命中 98%
 小时会话窗口 [██████████████████░] 90% 剩余  │ 重置 3h 42m
 周限制使用量 [████████████████░░░░] 82% 剩余  │ 重置 4d 12h
+今日 「MiniMax-M3」 705.8M
 ```
 
-**中屏（80–97 列）** — 3 行，段 1 紧凑 + 缓存命中 + 轮数（无明细）：
+**中屏（80–97 列）** — 4 行，段 1 紧凑 + 缓存命中 + 轮数（无明细），今日 top-1：
 
 ```
 会话 tokens 274.0M  │  5% 「259.0K/512.0K」  │  缓存命中 98%  │  轮数 56
 小时会话窗口 [██████████████████░] 90% 剩余  │ 重置 3h 42m
 周限制使用量 [████████████████░░░░] 82% 剩余  │ 重置 4d 12h
+今日 「MiniMax-M3」 274.0M
 ```
 
-**窄屏（55–79 列）** — 3 行，段 1 紧凑，去明细 / 去部分辅助（保留轮数或缓存命中）：
+**窄屏（55–79 列）** — 4 行，段 1 紧凑，去明细 / 去部分辅助（保留轮数或缓存命中），今日 top-1：
 
 ```
 会话 tokens 274.0M  │  5% 「259.0K/512.0K」  │  轮数 56
 小时会话窗口 [██████████████░░] 90% 剩余  │ 重置 3h 42m
 周限制使用量 [█████████████░░░] 82% 剩余  │ 重置 4d 12h
+今日 「MiniMax-M3」 274.0M
 ```
 
 **数字精度**：K / M 都带 1 位小数（`24.9K` / `512.0K` / `274.0M`），< 1000 的纯整数保持原样（`550` / `1`）。
@@ -118,7 +126,7 @@ patcher 失败时自动回退到**未打 patch 的官方 mcode**，不会卡住�
 ```
 /home/weekbin/orca/projects/mcode/mcode-quota/   # 工具集（git 仓库，single source of truth）
 ├── mcodex                       # 入口 wrapper
-├── mcode-quota-doctor           # 自检（22 项）
+├── mcode-quota-doctor           # 自检（21 项）
 ├── mcodex-push-remote           # GitHub 私有 mirror 同步
 ├── patches/                     # 按 mcode 版本分目录的 patcher
 │   ├── _loader.mjs              #   按 --current 选 patches/<v>/
@@ -170,6 +178,7 @@ mcode-quota-doctor
 | 上下文 | shellState `contextUsage`（runtime `getContextSnapshot`，mcode 自己的 `Context N% left` 用的同一份数据） | 随渲染实时读取 | — |
 | 缓存命中 | sqlite `SUM(cache_read_tokens) / (SUM(cache_read_tokens) + SUM(input_tokens))` | 10s（随会话轮询） | — |
 | 轮数 | sqlite `COUNT(DISTINCT turn_id)` | 10s（随会话轮询） | — |
+| 今日 按 LLM 模型 | sqlite `local_runtime_message_rows.data_json.context_usage_telemetry.model` 关联 `local_runtime_token_usage.turn_id` 聚合 | 60s | — |
 
 会话 token 总量 = `input_tokens + output_tokens + cache_read_tokens`。
 

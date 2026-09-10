@@ -39,7 +39,7 @@
 ## 文件 sha256
 
 ```
-f267f798bd6bf90a4c1f16c28332e2967877ffcb2a3b708f02a5fe572c400a10  mcode-patch-quota.mjs
+0428cc6c14d50e596ac8ebef3fc27658d6f7194d9d23fc0af48a5696aa5b65a1  mcode-patch-quota.mjs
 b2940f549ccfd703fd3938294c1c492d7dae61c1776b21bcfe1368263398d022  mcode-find-anchors.mjs
 ```
 
@@ -49,4 +49,4 @@ b2940f549ccfd703fd3938294c1c492d7dae61c1776b21bcfe1368263398d022  mcode-find-anc
 - PATCH_RENDER 用 v3.0.0 风格 `[...r, ..._qr]`（首版 ship 用的 `r.slice(1).concat(_qr)` 被推翻，见 DECISIONS.md D28）
 - 4-chunk 行恢复（首版 ship 删掉的，用户反馈需要）
 
-未来分叉时这里改成新 hash 并标注"diverged from 0.3.10 @ f267f798..."。
+未来分叉时这里改成新 hash 并标注"diverged from 0.3.10 @ 0428cc6c..."。

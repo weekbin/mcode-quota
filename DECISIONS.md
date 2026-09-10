@@ -39,7 +39,7 @@ CHANGELOG 讲**改了什么**。
 | D25 | 注入逻辑去硬编码 | 5 特征 / 属性名 / SQL 列全 AST 化 + 容错链 + 升级回归 | 5 特征里有 3 个硬编码属性名；PATCH_RENDER / SQL 全硬编码 | v3.0.0 |
 | D26 | async 副作用必须挂 `.catch` | 同步 `try/catch` 抓不到 async reject；必须显式挂 `.catch(()=>{})` 让 Promise 永不能升级 unhandledRejection | v3.0.0 的 `getContextSnapshot()` 无参调用导致 mcode 0.3.10 `TUI stopped unexpectedly` | v3.0.1 |
 | D27 | patcher 按 mcode 版本分目录 | `patches/<v>/mcode-patch-quota.mjs` + `_loader.mjs` 按 `--current` 选目录，找不到精确匹配时回退到最近 `<=` 版本 | 单 patcher 文件让"老 mcode 用户拉新 master"不匹配、git history 把 0.3.10/0.3.11 决策混在一根 branch | v3.1.0 |
-| D28 | mcode render 框架只接受 2 元素，today 行必须合并入 5h/周 | `super.render` 返 `["", r]`，加上我们的 3 行 = 5 元素被框架裁到 4；drop `""` 缩到 4，再裁到 2。最终 `topRows[0] + SEP + todayRow` 合并为 1 行；`topRows.length === 1 && todayRow` 守卫避免在 5h/周 stacked 时合并 | 4-chunk + 5h/周 + 今日 三行 装不下。最初试了 `[...r, ..._qr]` 数组路线，结果 today 在第二帧后消失。反复试错后定位到 mcode framework 的硬限制 | v3.2.0 |
+| D28 | mcode render 框架接受任意多元素；3 行布局可用 | `super.render` 返 `["", r]`（2 元素），PATCH_RENDER 用 v3.0.0 风格 `[...r, ..._qr]` 把 2 + 3 = 5 元素全推给 framework，pty 实测全部 paint。首版 ship 误判 framework 裁到 2，是因为用 stderr debug 误读了 framework 控制流；改 file-based log 后确认 5 元素都画 | v3.2.0 重做后 |
 
 ---
 
