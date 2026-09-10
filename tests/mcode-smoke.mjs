@@ -276,6 +276,41 @@ try {
   } else {
     fail++; console.log("  FAIL: could not extract shortenModelName from sidecar source");
   }
+
+  // ---- fmtTok unit conversion (v3.2.2) ----
+  // 1000M must display as 1.0B, not 1000.0M. K / M / B / T is the
+  // standard short-scale (US finance / tech) for token counts. We
+  // extract the function from the sidecar source and run a corpus.
+  console.log("\n[scenario] fmtTok: K / M / B / T short-scale, no 1000M ever");
+  const fmtSrc = sidecarSrc.match(/const fmtTok = \(n\) =>\s*\{[\s\S]*?\n\};/);
+  if (fmtSrc) {
+    const fmt = new Function(`
+      ${fmtSrc[0]}
+      return fmtTok;
+    `)();
+    const fmtCorpus = [
+      [0, "0"],
+      [999, "999"],
+      [1_000, "1.0K"],
+      [999_999, "1.0M"],            // bumps to M (avoids "1000.0K")
+      [1_000_000, "1.0M"],
+      [880_400_000, "880.4M"],
+      [999_999_999, "1.0B"],        // bumps to B (avoids "1000.0M")
+      [1_000_000_000, "1.0B"],      // <- the original bug the user reported
+      [10_581_200_000, "10.6B"],
+      [999_999_999_999, "1.0T"],    // bumps to T (avoids "1000.0B")
+      [1_000_000_000_000, "1.0T"],
+      [1_500_000_000_000, "1.5T"],
+      [NaN, "0"],
+      [Infinity, "0"],
+    ];
+    for (const [input, expected] of fmtCorpus) {
+      const got = fmt(input);
+      check(got === expected, `fmtTok(${input}) === "${expected}" (got "${got}")`);
+    }
+  } else {
+    fail++; console.log("  FAIL: could not extract fmtTok from sidecar source");
+  }
 } finally {
   for (const d of tempDirs) { try { rmSync(d, { recursive: true, force: true }); } catch {} }
 }

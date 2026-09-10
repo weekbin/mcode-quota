@@ -176,8 +176,8 @@ if [[ -f "$SIDECAR" ]]; then
     warn "live render produced no quota line (mmx may be down). Raw: $(printf '%s' "$CLEAN" | head -c120)"
   fi
   if printf '%s' "$CLEAN" | grep -q "今日"; then
-    if printf '%s' "$CLEAN" | grep -qE "今日 「[^」]+」 [0-9.]+[KM]"; then
-      ok "today-by-model: $(printf '%s' "$CLEAN" | grep -oE '今日 「[^」]+」 [0-9.]+[KM]' | head -1 | cut -c1-50)"
+    if printf '%s' "$CLEAN" | grep -qE "今日 「[^」]+」 [0-9.]+[KMBT]"; then
+      ok "today-by-model: $(printf '%s' "$CLEAN" | grep -oE '今日 「[^」]+」 [0-9.]+[KMBT]' | head -1 | cut -c1-50)"
     else
       info "today row present but no model data yet (sqlite has no usage for today)"
     fi
