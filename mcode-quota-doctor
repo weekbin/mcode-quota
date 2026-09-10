@@ -35,8 +35,11 @@ else
 fi
 
 # 1b. versioned patcher selection — visible which patches/<v>/ is in use
+# Use ls instead of `find -printf` so this works on both GNU find (Linux) and
+# BSD find (macOS). BSD find rejects `-printf` and doctor would silently report
+# zero versioned patches.
 if [[ -d "$PATCHES_DIR" ]]; then
-  AVAILABLE_PATCHES="$(find "$PATCHES_DIR" -maxdepth 1 -mindepth 1 -type d -printf '%f\n' 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tr '\n' ' ')"
+  AVAILABLE_PATCHES="$(ls -1 "$PATCHES_DIR" 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tr '\n' ' ')"
   if [[ -n "$AVAILABLE_PATCHES" ]]; then
     ok "versioned patches available: $AVAILABLE_PATCHES"
     # Resolve which one the loader would pick for the current mcode version.

@@ -5,7 +5,8 @@
   "type": "module",
   "bin": {
     "mcodex": "./mcodex",
-    "mcode-quota-doctor": "./mcode-quota-doctor"
+    "mcode-quota-doctor": "./mcode-quota-doctor",
+    "mcodex-install": "./mcodex-install"
   },
   "scripts": {
     "patch": "node patches/_loader.mjs",
@@ -16,6 +17,7 @@
   },
   "files": [
     "mcodex",
+    "mcodex-install",
     "mcode-quota-doctor",
     "mcodex-push-remote",
     "patches/",
@@ -24,6 +26,7 @@
     "README.md",
     "ARCHITECTURE.md",
     "MAINTENANCE.md",
+    "INSTALL.md",
     "CHANGELOG.md",
     "DECISIONS.md"
   ],

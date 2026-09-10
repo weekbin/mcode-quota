@@ -25,7 +25,21 @@
 
 set -euo pipefail
 
-QUOTA_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Resolve the real path of this script, following symlinks. mcodex is often
+# installed as `ln -s <repo>/mcodex ~/.minimax/bin/mcodex`, and
+# BASH_SOURCE[0] returns the symlink path, not the project root. Without
+# resolving, every relative path below (patches/, sidecar/) would be wrong
+# and the patcher would fail to find its loader.
+SOURCE="${BASH_SOURCE[0]}"
+while [[ -L "$SOURCE" ]]; do
+  TARGET="$(readlink "$SOURCE")"
+  if [[ "$TARGET" = /* ]]; then
+    SOURCE="$TARGET"
+  else
+    SOURCE="$(dirname "$SOURCE")/$TARGET"
+  fi
+done
+QUOTA_DIR="$(cd "$(dirname "$SOURCE")" && pwd)"
 CODE_ROOT="${MCODE_CODE_ROOT:-${HOME}/.minimax-code}"
 FORK_BASE="${MCODE_QUOTA_FORK_DIR:-${HOME}/.local/share/mcode-quota/mcode-clone}"
 

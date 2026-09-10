@@ -2,6 +2,36 @@
 
 记录每次对工具集的修改。新条目加在最上面。
 
+## 2026-09-10 — v3.2.5：macOS 首次安装兼容 + 自动 shim
+
+首次在 macOS 跑 mcodex，撞到 7 个 GAP（2 个项目 bug + 5 个流程 / 文档 / 依赖缺失），
+全部修完。下次别的机器装可以 `git clone && ./mcodex-install` 一次跑通。
+
+### 修
+
+- `mcodex` wrapper: 用 `while [[ -L ]]` 解析 symlink —— `BASH_SOURCE[0]`
+  在 macOS + Linux 都不自动 follow symlink，导致 `ln -s mcodex ~/.minimax/bin/`
+  装 PATH 入口时 patcher 路径全错。现在 symlink 直接装就能跑。
+- `mcode-quota-doctor`: 把 `find -printf` 换成 `ls -1 | grep | sort -V`，
+  兼容 macOS BSD find。doctor 在 macOS 上不再误报 "patches/ has no
+  versioned subdirectories"。
+- 新增 `mcodex-install` 脚本：自动检测 mcode 是 npm-global 还是
+  platform 装法、生成 shim、装 acorn 依赖、按需装 `mmx-cli`、装 PATH
+  入口、跑 `mcodex --version` 验证。幂等，重复跑安全。`package.json`
+  的 `bin` + `files` 已加。
+- 新增 `INSTALL.md`: 完整安装指南 + 环境依赖清单（required / optional /
+  out-of-scope） + macOS 踩坑表 + 升级 / 卸载 / 故障诊断。
+
+### 文档化（不修，但记下来）
+
+- `mmx` 不在 PATH：5h/周 quota 数据源。`mcodex-install` 会自动装
+  `mmx-cli`（`npm install -g mmx-cli`），缺了不会卡、5h/周 会空白，
+  其他 5 个数据源照常。
+- `mavis-trash` 拦截 `rm`：用户机器特定 hook。安装 / 卸载脚本全部
+  走 `node -e 'require("fs").unlinkSync(...)'`，避开。
+- pristine tarball 文件 mtime 是 `1985-01-01`（npm pack 的决定性
+  时间戳）。doctor 用 `cmp` 字节比较，不看 stat mtime。
+
 ## 2026-09-10 — v3.2.4：逻辑自检 —— 一个 P0 + SQL 性能重做
 
 对补丁策略与 SQL 做了一轮系统排查，发现并修复 4 个问题，其中 1 个会

@@ -1,0 +1,230 @@
+#!/usr/bin/env bash
+# mcodex-install — first-time setup for the mcodex quota status line.
+#
+# This script is idempotent: re-running it is safe and only fills in
+# anything that is missing. It does NOT modify mcode itself in any layout
+# (npm-global or ~/.minimax-code platform). mcodex never writes to mcode —
+# all patches go into a private fork under ~/.local/share/mcode-quota/.
+#
+# What it does:
+#   1. Locates mcode (npm-global via `npm root -g`, or platform install at
+#      ~/.minimax-code/releases/<v>/). Aborts if neither is found.
+#   2. Reads the mcode version from the install (package.json or
+#      releases/<v>/package.json).
+#   3. Creates the shim that mcodex expects (only when the install is
+#      npm-global; platform installs already have this layout):
+#         ~/.minimax-code/current                                (version)
+#         ~/.minimax-code/releases/<v>/.mcode-launcher          (mcodex parses)
+#         ~/.minimax-code/releases/<v>/lib/node_modules/@minimax-ai/code
+#                                                            -> npm-global path
+#   4. Runs `npm install` in the project to materialize acorn (the only
+#      runtime dep used by the patcher).
+#   5. Tries to install `mmx` from `mmx-cli` on npm. mmx is the source of
+#      the 5h/周 quota line; if it is missing or not logged in, the quota
+#      line degrades gracefully (other data still works). Skipped if mmx
+#      is already on PATH.
+#   6. Installs the PATH entry (default ~/.minimax/bin/mcodex). On macOS
+#      the project's mcodex already follows symlinks (see F1 commit), so
+#      a plain `ln -s` works. Also supports --copy for users who don't
+#      want a symlink.
+#   7. Runs `mcodex --version` once to build the fork (idempotent, fast
+#      when the fork is already correct).
+#
+# Flags:
+#   --mmx-skip           do not attempt to install mmx-cli even if missing
+#   --no-fork            do not run mcodex after install (skip step 7)
+#   --bin-dir=DIR        PATH entry directory (default ~/.minimax/bin)
+#   --project=DIR        override the project directory (where mcodex lives)
+#   --copy               install PATH entry as a copy instead of a symlink
+#
+# Exit codes:
+#   0  install complete
+#   1  mcode not found
+#   2  invalid args
+#   3  critical step failed (project dir missing, etc.)
+#
+# mcodex does not auto-run this. You invoke it once per machine.
+
+set -euo pipefail
+
+# ---------- args ----------
+MMX_SKIP=0
+NO_FORK=0
+BIN_DIR="${HOME}/.minimax/bin"
+COPY_MODE=0
+PROJECT_DIR=""
+
+usage() {
+  sed -n '2,40p' "$0"
+  exit "${1:-0}"
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --mmx-skip)   MMX_SKIP=1 ;;
+    --no-fork)    NO_FORK=1 ;;
+    --bin-dir=*)  BIN_DIR="${1#*=}" ;;
+    --project=*)  PROJECT_DIR="${1#*=}" ;;
+    --copy)       COPY_MODE=1 ;;
+    -h|--help)    usage 0 ;;
+    *)            echo "mcodex-install: unknown arg: $1" >&2; usage 2 ;;
+  esac
+  shift
+done
+
+# ---------- helpers ----------
+say()  { printf "[mcodex-install] %s\n" "$*"; }
+ok()   { say "✓ $*"; }
+warn() { say "! $*" >&2; }
+fail() { say "✗ $*" >&2; exit "${2:-1}"; }
+
+# ---------- 1. locate mcode ----------
+say "locating mcode..."
+
+NPM_GLOBAL_CODE=""
+if command -v mcode >/dev/null 2>&1; then
+  # npm-global install: the mcode on PATH is a symlink into
+  #   $(npm root -g)/@minimax-ai/code/cli.js
+  NPM_GLOBAL_CODE="$(npm root -g)/@minimax-ai/code"
+  if [[ -f "$NPM_GLOBAL_CODE/package.json" ]]; then
+    ok "found mcode at npm-global: $NPM_GLOBAL_CODE"
+  else
+    NPM_GLOBAL_CODE=""
+  fi
+fi
+
+PLATFORM_CODE_ROOT=""
+if [[ -f "$HOME/.minimax-code/current" ]]; then
+  PLATFORM_CURRENT="$(tr -d '\r\n' < "$HOME/.minimax-code/current")"
+  if [[ -d "$HOME/.minimax-code/releases/$PLATFORM_CURRENT/lib/node_modules/@minimax-ai/code" ]]; then
+    PLATFORM_CODE_ROOT="$HOME/.minimax-code/releases/$PLATFORM_CURRENT"
+    ok "found mcode at platform install: $PLATFORM_CODE_ROOT"
+  fi
+fi
+
+if [[ -z "$NPM_GLOBAL_CODE" && -z "$PLATFORM_CODE_ROOT" ]]; then
+  fail "mcode not found. Install mcode first:
+  - npm-global: npm install -g @minimax-ai/code
+  - platform:   run the MiniMax Inside Code installer
+  then re-run mcodex-install." 1
+fi
+
+# ---------- 2. read version ----------
+if [[ -n "$NPM_GLOBAL_CODE" ]]; then
+  MCODE_VERSION="$(node -e 'console.log(require(process.argv[1]+"/package.json").version)' "$NPM_GLOBAL_CODE")"
+  MCODE_REAL_PATH="$NPM_GLOBAL_CODE"
+  MCODE_KIND="npm-global"
+else
+  MCODE_VERSION="$PLATFORM_CURRENT"
+  MCODE_REAL_PATH="$PLATFORM_CODE_ROOT/lib/node_modules/@minimax-ai/code"
+  MCODE_KIND="platform"
+fi
+ok "mcode version: $MCODE_VERSION ($MCODE_KIND layout)"
+
+# ---------- 3. project dir + acorn ----------
+if [[ -z "$PROJECT_DIR" ]]; then
+  # Default: this script's own directory (works whether installed as
+  # npm-global, platform, or run from a git checkout).
+  PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+fi
+if [[ ! -f "$PROJECT_DIR/mcodex" ]]; then
+  fail "project layout not found at $PROJECT_DIR (no mcodex wrapper)" 3
+fi
+ok "project: $PROJECT_DIR"
+
+if [[ -f "$PROJECT_DIR/package.json" && ! -d "$PROJECT_DIR/node_modules/acorn" ]]; then
+  say "installing project dependencies (acorn)..."
+  (cd "$PROJECT_DIR" && npm install --no-audit --no-fund --silent) \
+    && ok "acorn installed" \
+    || warn "npm install failed — patcher will fail until this is fixed"
+else
+  ok "acorn present (or no package.json — single-file install)"
+fi
+
+# ---------- 4. shim (only for npm-global) ----------
+if [[ "$MCODE_KIND" == "npm-global" ]]; then
+  say "creating shim at ~/.minimax-code/releases/$MCODE_VERSION/ ..."
+  mkdir -p "$HOME/.minimax-code/releases/$MCODE_VERSION/lib/node_modules/@minimax-ai"
+  ln -sfn "$MCODE_REAL_PATH" \
+          "$HOME/.minimax-code/releases/$MCODE_VERSION/lib/node_modules/@minimax-ai/code"
+  # .mcode-launcher — mcodex reads the node binary from this file via
+  # `sed -n "s/^exec '\([^']*\)'.*/\1/p"`.
+  NODE_BIN="$(command -v node)"
+  cat > "$HOME/.minimax-code/releases/$MCODE_VERSION/.mcode-launcher" <<EOF
+#!/usr/bin/env bash
+# Generated by mcodex-install. mcodex parses this file to read the node
+# binary; the actual entry point is the fork under
+# ~/.local/share/mcode-quota/mcode-clone/.
+exec '$NODE_BIN' '$MCODE_REAL_PATH/cli.js' "\$@"
+EOF
+  chmod +x "$HOME/.minimax-code/releases/$MCODE_VERSION/.mcode-launcher"
+  echo -n "$MCODE_VERSION" > "$HOME/.minimax-code/current"
+  ok "shim ready (symlink + .mcode-launcher + current pointer)"
+fi
+
+# ---------- 5. mmx ----------
+if [[ "$MMX_SKIP" -eq 1 ]]; then
+  ok "mmx: skip (per --mmx-skip)"
+elif command -v mmx >/dev/null 2>&1; then
+  ok "mmx: present at $(command -v mmx)"
+else
+  say "installing mmx-cli from npm (5h/周 quota data source)..."
+  if npm install -g mmx-cli --no-audit --no-fund --silent 2>&1 | tail -5; then
+    if command -v mmx >/dev/null 2>&1; then
+      ok "mmx installed: $(command -v mmx)"
+    else
+      warn "mmx install reported success but binary is not on PATH"
+    fi
+  else
+    warn "mmx install failed — 5h/周 quota line will stay empty (other data sources still work)"
+  fi
+fi
+
+# ---------- 6. PATH entry ----------
+say "installing PATH entry at $BIN_DIR/mcodex ..."
+mkdir -p "$BIN_DIR"
+if [[ -e "$BIN_DIR/mcodex" ]]; then
+  if [[ -L "$BIN_DIR/mcodex" && "$(readlink "$BIN_DIR/mcodex")" == "$PROJECT_DIR/mcodex" ]]; then
+    ok "PATH entry already correct (symlink → $PROJECT_DIR/mcodex)"
+  else
+    # Replace whatever is there (a stale wrapper, a copy, a wrong target).
+    node -e 'require("fs").unlinkSync(process.argv[1])' "$BIN_DIR/mcodex" \
+      || warn "could not unlink existing $BIN_DIR/mcodex (use --copy or remove manually)"
+    if [[ "$COPY_MODE" -eq 1 ]]; then
+      cp "$PROJECT_DIR/mcodex" "$BIN_DIR/mcodex"
+      chmod +x "$BIN_DIR/mcodex"
+      ok "PATH entry installed (copy)"
+    else
+      ln -s "$PROJECT_DIR/mcodex" "$BIN_DIR/mcodex"
+      ok "PATH entry installed (symlink)"
+    fi
+  fi
+else
+  if [[ "$COPY_MODE" -eq 1 ]]; then
+    cp "$PROJECT_DIR/mcodex" "$BIN_DIR/mcodex"
+    chmod +x "$BIN_DIR/mcodex"
+    ok "PATH entry installed (copy)"
+  else
+    ln -s "$PROJECT_DIR/mcodex" "$BIN_DIR/mcodex"
+    ok "PATH entry installed (symlink)"
+  fi
+fi
+
+# ---------- 7. first run (build fork) ----------
+if [[ "$NO_FORK" -eq 1 ]]; then
+  say "skipping first-run (per --no-fork)"
+else
+  say "first run: building fork + applying patches..."
+  if "$BIN_DIR/mcodex" --version; then
+    ok "fork built and mcodex responsive"
+  else
+    warn "mcodex --version failed — see stderr; fork may not be ready"
+  fi
+fi
+
+echo
+ok "mcodex install complete."
+echo "  next:"
+echo "    $BIN_DIR/mcodex                 # start mcode with quota status line"
+echo "    $PROJECT_DIR/mcode-quota-doctor # run self-check (21 items)"
+echo "    mmx auth login                  # if quota line shows 'no data'"

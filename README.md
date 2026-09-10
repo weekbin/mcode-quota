@@ -159,6 +159,9 @@ mcodex
 /home/weekbin/orca/projects/mcode/mcode-quota/mcode-quota-doctor
 ```
 
+**新机器首次安装**（macOS / Linux，自动检测 mcode 装法 + 装缺失依赖）：
+见 [INSTALL.md](INSTALL.md)。
+
 ## 升级 mcode
 
 ```bash
