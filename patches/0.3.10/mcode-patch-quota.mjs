@@ -88,17 +88,24 @@ import { existsSync } from "node:fs";
 const CACHE_TTL_MS = Number(process.env.MCODE_QUOTA_TTL_MS || 60_000);
 const FETCH_TIMEOUT_MS = 20_000;
 const SESSION_TTL_MS = 10_000;
+const TODAY_TTL_MS = 60_000;       // daily stats — 60s is fine, no need to pound sqlite
 const REFRESH_MIN_INTERVAL_MS = 500;
 
 let raw = { valid: false, dRem: null, dReset: "", wRem: null, wReset: "", fetchedAt: 0, lastSuccessAt: 0 };
 let session = { valid: false, total: 0, input: 0, output: 0, cache: 0, reasoning: 0, sessionId: null, fetchedAt: 0, turns: 0, cacheHit: null, source: null };
+// Today (since local 00:00): per-LLM-model token totals. Sourced from
+// local_runtime_message_rows.data_json.context_usage_telemetry.model
+// joined to local_runtime_token_usage via turn_id. The model column on
+// local_runtime_token_usage is NULL in 0.3.11, so the join via message
+// rows is the only path that has the LLM model name today.
+let today = { valid: false, items: [], fetchedAt: 0, dayStartMs: 0 };
 let started = false;
 let sessionTimer = null;
 let lastRefreshAt = 0;
 // Track which data sources have not yet been filled on the first paint, so
 // the renderer can show a muted "…" placeholder instead of an empty cell.
 // Cleared as each fetch lands its first valid result.
-let pendingPlaceholders = { quota: true, session: true, context: true };
+let pendingPlaceholders = { quota: true, session: true, context: true, todayByModel: true };
 
 const C_SUCCESS = "38;2;60;160;90";
 const C_WARNING = "38;2;200;150;40";
@@ -122,6 +129,7 @@ const L_CACHE = "\u7f13\u5b58";                                   // 缓存
 const L_CONTEXT = "\u4e0a\u4e0b\u6587";                           // 上下文
 const L_HIT = "\u7f13\u5b58\u547d\u4e2d";                         // 缓存命中
 const L_TURN = "\u8f6e\u6570";                                    // 轮数
+const L_TODAY = "\u4eca\u65e5";                                   // 今日
 
 const ESC = "\\u001b[";
 const RESET_SEQ = ESC + C_RESET + "m";
@@ -390,11 +398,13 @@ globalThis.__mcodeQuotaRender = function (width) {
     // screen just because the bars needed more room.
     const labelWidth = Math.max(dw(L_LABEL_5H), dw(L_LABEL_WEEK));
 
-    // 5h / week row builders. q* keeps reset times for stacked rows; q*h
+    // 5h / week row builders. q* keeps reset times for stacked rows; q*n
     // drops them when the bars share a single row. labelWidth keeps the
     // 5h and 周 prefixes visually aligned when stacked.
     const q5  = (bar) => renderOne(L_LABEL_5H, raw.dRem, raw.dReset, bar, labelWidth);
     const qw  = (bar) => renderOne(L_LABEL_WEEK, raw.wRem, raw.wReset, bar, labelWidth);
+    const q5n = (bar) => renderOne(L_LABEL_5H, raw.dRem, "", bar, labelWidth);
+    const qwn = (bar) => renderOne(L_LABEL_WEEK, raw.wRem, "", bar, labelWidth);
 
     // Top section (token usage): one combined row when it fits, otherwise
     // two stacked rows with aligned labels. Reset times are kept on every
@@ -447,123 +457,67 @@ globalThis.__mcodeQuotaRender = function (width) {
       }
     }
 
-    // Top section (v2.5+): 会话 tokens [breakdown] │ 上下文 │ 缓存命中 │ 轮数
+    // v3.2: 4-chunk row (会话 tokens / 上下文 / 缓存命中 / 轮数) was
+    // removed to make room for the today-by-model row. mcode's render
+    // framework clips the widget's return array to 2 elements total
+    // (1 super status line + 1 of ours). The user explicitly chose
+    // (5h/week + today) over (4-chunk + 5h/week) — see D28.
     //
-    // v2.6 contract: this block lives on ONE row at any width that can hold
-    // the smallest meaningful form (会话 + 上下文). Above that, append more
-    // detail chunks from the lowest-priority (most informative) end first.
+    // Layout strategy: append the today row as a SEP-joined suffix to
+    // the 5h/周 combined row when wide enough; otherwise show only the
+    // 5h/周 row (today silently degrades). The today row was originally
+    // requested as a separate row "下方" of 5h/周, but the framework
+    // limit forced this compromise — same data, same color, just
+    // on the same visual line as 5h/周.
     //
-    // Priority order (most informative first; the first one that fits wins):
-    //   1. 会话[detail] │ 上下文 │ 缓存命中 │ 轮数
-    //   2. 会话[detail] │ 上下文 │ 缓存命中
-    //   3. 会话[detail] │ 上下文 │ 轮数
-    //   4. 会话[detail] │ 上下文
-    //   5. 会话[compact] │ 上下文 │ 缓存命中 │ 轮数
-    //   6. 会话[compact] │ 上下文 │ 缓存命中
-    //   7. 会话[compact] │ 上下文 │ 轮数
-    //   8. 会话[compact] │ 上下文
-    //   9. 会话[detail] (no 上下文)
-    //  10. 会话[compact] (no 上下文)
-    //  11. 上下文
-    //
-    // MCODE_QUOTA_TAIL:
-    //   full  — always allow detail (skip the compact-only candidates)
-    //   compact — never show detail
-    //   auto  — show detail only when the highest-priority candidate with
-    //           detail fits; fall back to compact otherwise
-    //
-    // If nothing fits, degrade to wrapping: try the most-informative form on
-    // its own line, then add the next chunk on a new line, etc. Only as a
-    // last resort.
-    const join = (...chunks) => chunks.filter(Boolean).join(SEP);
-    // Placeholder chunks for data sources that haven't filled yet. Cleared
-    // as each fetch lands (see fetchQuotaOnce / fetchSessionOnce /
-    // readContextUsage).
-    const placeholder = (label) => muted(label + " …");
-    const sessionFull = renderSessionChunk(false) || (pendingPlaceholders.session ? placeholder("会话 tokens") : null);
-    const sessionCompact = renderSessionChunk(true) || sessionFull;
-    const ctx = renderContextChunk() || (pendingPlaceholders.context ? placeholder("上下文") : null);
-    const hit = renderCacheHitChunk() || (pendingPlaceholders.session ? placeholder("缓存命中") : null);
-    const turn = renderTurnCountChunk() || (pendingPlaceholders.session ? placeholder("轮数") : null);
+    // The chunk builders are kept below in case the layout is re-extended
+    // in the future — see renderSessionChunk / renderContextChunk etc.
 
-    const buildCandidates = (allowDetail) => {
-      const list = [];
-      if (allowDetail && sessionFull && ctx) {
-        list.push(join(sessionFull, ctx, hit, turn));
-        list.push(join(sessionFull, ctx, hit));
-        list.push(join(sessionFull, ctx, turn));
-        list.push(join(sessionFull, ctx));
-      }
-      if (sessionCompact && ctx) {
-        list.push(join(sessionCompact, ctx, hit, turn));
-        list.push(join(sessionCompact, ctx, hit));
-        list.push(join(sessionCompact, ctx, turn));
-        list.push(join(sessionCompact, ctx));
-      }
-      if (allowDetail && sessionFull) list.push(sessionFull);
-      if (sessionCompact) list.push(sessionCompact);
-      if (ctx) list.push(ctx);
-      return list;
-    };
-
-    const topRowCandidates = (() => {
-      if (TAIL_MODE === "compact") return buildCandidates(false);
-      if (TAIL_MODE === "full") return buildCandidates(true);
-      // auto: prefer detail, but if detail doesn't fit (and ctx+hint doesn't
-      // fit either), still allow the compact candidates. We only drop
-      // detail if its highest-priority combined form overflows.
-      const detailList = buildCandidates(true);
-      const compactList = buildCandidates(false);
-      const detailFits = detailList.some((c) => dw(c) <= width);
-      return detailFits ? detailList : compactList;
-    })();
-
-    if (topRowCandidates.some((c) => dw(c) <= width)) {
-      // Pick the most-informative that fits on one row.
-      const fits = topRowCandidates.filter((c) => dw(c) <= width);
-      fits.sort((a, b) => dw(b) - dw(a));
-      lines.push(fits[0]);
-    } else {
-      // Nothing fits on one row: degrade to multi-line, most-informative
-      // first. The session chunk is mandatory; other chunks land on later
-      // lines if the terminal is too narrow for everything.
-      const coreLine = sessionFull || sessionCompact || ctx || "";
-      lines.push(coreLine);
-      const tailPieces = [ctx, hit, turn].filter(Boolean);
-      const used = coreLine;
-      let buf = "";
-      for (const p of tailPieces) {
-        const candidate = buf ? buf + SEP + p : p;
-        if (dw(candidate) <= width) {
-          buf = candidate;
+    // v2.5: token-usage bars (小时会话窗口 / 周限制使用量) live on top
+    // (closest to the mcode status bar). On wide screens they share one
+    // row; on narrow screens they stack on two rows with reset times.
+    if (topRows.length > 0) {
+      // v3.2: try to merge the today row as a suffix onto the combined
+      // 5h/周 row. If the merged line fits, that's our single line for
+      // this frame; otherwise just the 5h/周 rows go through.
+      const todayRow = renderTodayByModelRow(width)[0] || null;
+      if (topRows.length === 1 && todayRow) {
+        // Try merge with full 5h/周 (with reset times)
+        const merged = topRows[0] + SEP + todayRow;
+        if (dw(merged) <= width) {
+          lines.push(merged);
         } else {
-          if (buf) lines.push(buf);
-          buf = p;
+          // Fallback: drop the reset times from 5h/周 to make room for
+          // today. The bare bar is shorter and usually fits.
+          const noReset = fit((bar) => q5n(bar) + SEP + qwn(bar), width);
+          const mergedNoReset = noReset + SEP + todayRow;
+          if (dw(mergedNoReset) <= width) {
+            lines.push(mergedNoReset);
+          } else {
+            // Truly too narrow: just show 5h/周 with reset times; today
+            // silently degrades (re-appears on a wider screen).
+            lines.push(...topRows);
+          }
         }
+      } else {
+        lines.push(...topRows);
       }
-      if (buf && !lines.includes(buf)) lines.push(buf);
+    } else if (placeholderToday()) {
+      // No quota data but we have a today placeholder: still useful.
+      lines.push(placeholderToday());
     }
-
-    // v2.5: section order swapped. 会话 tokens + 上下文 now lives on top
-    // (closest to the mcode status bar); the token-usage bars (小时会话窗口
-    // / 周限制使用量) are below.
-    lines.push(...topRows);
   } else {
-    // No quota data: still surface 会话 tokens / 上下文 if available.
-    const join = (...chunks) => chunks.filter(Boolean).join(SEP);
-    const placeholder = (label) => muted(label + " …");
-    const sessionFull = renderSessionChunk(false) || (pendingPlaceholders.session ? placeholder("会话 tokens") : null);
-    const sessionCompact = renderSessionChunk(true) || sessionFull;
-    const ctx = renderContextChunk() || (pendingPlaceholders.context ? placeholder("上下文") : null);
-    const hit = renderCacheHitChunk() || (pendingPlaceholders.session ? placeholder("缓存命中") : null);
-    const turn = renderTurnCountChunk() || (pendingPlaceholders.session ? placeholder("轮数") : null);
-    const tryList = [];
-    if (sessionFull && ctx) tryList.push(join(sessionFull, ctx, hit, turn));
-    if (sessionCompact && ctx) tryList.push(join(sessionCompact, ctx, hit, turn));
-    if (sessionFull) tryList.push(sessionFull);
-    if (sessionCompact) tryList.push(sessionCompact);
-    if (ctx) tryList.push(ctx);
-    for (const c of tryList) if (dw(c) <= width) { lines.push(c); break; }
+    // No quota data yet: just the today row (sourced from sqlite, does
+    // not depend on mmx). The 4-chunk placeholders would also try to
+    // render here, but they would take the second of our 2 lines and
+    // push the today row out. So we skip them when raw is invalid and
+    // show only the today row.
+    const todayRows = renderTodayByModelRow(width);
+    if (todayRows.length > 0) {
+      lines.push(todayRows[0]);
+    } else if (placeholderToday()) {
+      lines.push(placeholderToday());
+    }
   }
   // First render is a reliable "this is the real TUI" signal — start then.
   if (!started) start();
@@ -840,6 +794,155 @@ async function fetchSessionOnce() {
   requestRefresh();
 }
 
+// ----------------------------------------------------------------------------
+// Today (since local 00:00): per-LLM-model token totals.
+//
+// mcode 0.3.11's local_runtime_token_usage.model column is always NULL,
+// so the model name lives in
+// local_runtime_message_rows.data_json.context_usage_telemetry.model
+// for assistant messages. We join via turn_id in JS to keep the query
+// simple and avoid an unindexed LEFT JOIN that the v3.0.1 hotfix was
+// about (per-model totals are cheap; the heavier per-turn aggregations
+// still happen in the join-side query, but with a narrow filter).
+//
+// Returns null on any error (sqlite missing, schema drift, etc.) — the
+// caller leaves the existing today state alone so a transient failure
+// does not blank the row mid-day.
+// ----------------------------------------------------------------------------
+async function fetchTodayByModelFromSqlite() {
+  try {
+    if (!sqliteModPromise) sqliteModPromise = import("node:sqlite");
+    const { DatabaseSync } = await sqliteModPromise;
+    if (!sqliteDb || sqliteDbPath !== SQLITE_DEFAULT_PATH) {
+      if (sqliteDb) { try { sqliteDb.close(); } catch {} }
+      sqliteDb = new DatabaseSync(SQLITE_DEFAULT_PATH, { readOnly: true });
+      sqliteDbPath = SQLITE_DEFAULT_PATH;
+    }
+    // Local midnight today, in JS milliseconds. token_usage.ts is also
+    // milliseconds (Unix epoch * 1000).
+    const now = new Date();
+    const dayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+    const dayStartMs = dayStart;
+    const dayEndMs = dayStartMs + 86400 * 1000;
+
+    // 1) turn_id -> LLM model name from assistant message rows.
+    //    The data_json blob is small per row; the predicate is indexed by
+    //    the (session_id, msg_id) unique index plus a row scan on
+    //    created_at_ms.  We only look at today's rows.
+    const msgRows = sqliteDb.prepare(
+      "SELECT turn_id, " +
+        "json_extract(data_json, '$.context_usage_telemetry.model') AS model " +
+      "FROM local_runtime_message_rows " +
+      "WHERE role = 'assistant' " +
+        "AND turn_id IS NOT NULL " +
+        "AND created_at_ms >= ? " +
+        "AND created_at_ms < ? " +
+        "AND json_extract(data_json, '$.context_usage_telemetry.model') IS NOT NULL"
+    ).all(dayStartMs, dayEndMs);
+
+    const turnToModel = new Map();
+    for (const r of msgRows) {
+      if (r.turn_id && r.model) turnToModel.set(r.turn_id, r.model);
+    }
+
+    // 2) Aggregate token_usage today per model.
+    const tokRows = sqliteDb.prepare(
+      "SELECT turn_id, session_id, " +
+        "input_tokens, output_tokens, cache_read_tokens, cache_write_tokens " +
+      "FROM local_runtime_token_usage " +
+      "WHERE ts >= ? AND ts < ?"
+    ).all(dayStartMs, dayEndMs);
+
+    const agg = new Map();
+    let matched = 0;
+    for (const r of tokRows) {
+      const model = (r.turn_id && turnToModel.get(r.turn_id)) || null;
+      const key = model || "<unknown>";
+      if (model) matched++;
+      let a = agg.get(key);
+      if (!a) { a = { in: 0, out: 0, cr: 0, cw: 0, turns: new Set(), sessions: new Set() }; agg.set(key, a); }
+      a.in += r.input_tokens || 0;
+      a.out += r.output_tokens || 0;
+      a.cr += r.cache_read_tokens || 0;
+      a.cw += r.cache_write_tokens || 0;
+      if (r.turn_id) a.turns.add(r.turn_id);
+      if (r.session_id) a.sessions.add(r.session_id);
+    }
+    const items = [];
+    for (const [model, a] of agg) {
+      items.push({
+        model,
+        total: a.in + a.out + a.cr + a.cw,
+        input: a.in, output: a.out, cacheRead: a.cr, cacheWrite: a.cw,
+        turns: a.turns.size, sessions: a.sessions.size,
+      });
+    }
+    items.sort((x, y) => y.total - x.total);
+    today = { valid: true, items, fetchedAt: Date.now(), dayStartMs, matched };
+    pendingPlaceholders.todayByModel = false;
+    return items;
+  } catch {
+    return null;
+  }
+}
+
+async function fetchTodayByModelOnce() {
+  // If the day boundary has rolled over since the last fetch, force a
+  // refresh — otherwise we'd keep showing yesterday's totals after 00:00.
+  const now = new Date();
+  const dayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const dayRollover = today.fetchedAt && today.dayStartMs !== dayStart;
+  if (today.valid && !dayRollover && Date.now() - today.fetchedAt < TODAY_TTL_MS) return;
+  const items = await fetchTodayByModelFromSqlite();
+  if (items) requestRefresh();
+}
+
+// Render the today-by-model row. Returns an array of strings (one per
+// line). The caller appends the array to lines only if non-empty.
+// width is the column budget for one line. We pick the top-N models
+// that fit:
+//   width >= 100:  up to 5 models on one line
+//   width >= 70:   up to 3 models
+//   else:          1 model
+// If even 1 model does not fit, return [] (drop the row entirely).
+function renderTodayByModelRow(width) {
+  if (!today.valid) return [];
+  if (today.items.length === 0) return [];
+  // Drop the synthetic <unknown> bucket from the visible list — it's only
+  // useful for debugging. If that is the only bucket, the row is empty.
+  const visible = today.items.filter((it) => it.model !== "<unknown>");
+  if (visible.length === 0) return [];
+  const maxN = width >= 100 ? 5 : width >= 70 ? 3 : 1;
+  const items = visible.slice(0, maxN);
+  const buildOne = (it) => {
+    // 「model」 total — model in muted CJK brackets, total in the same
+    // success-green family as 会话 tokens for visual consistency.
+    const modelStr = it.model;
+    const totalStr = fmtTok(it.total);
+    return "\u300c" + label(modelStr) + "\u300d " + ESC + C_SUCCESS + "m" + totalStr + RESET_SEQ;
+  };
+  // Build the longest possible line first, then trim from the right
+  // until it fits in width. The first model is always kept so the
+  // row never becomes empty as long as the user has any data.
+  let chosen = [];
+  for (let n = items.length; n >= 1; n--) {
+    const lineParts = [];
+    lineParts.push(label(L_TODAY) + " ");
+    for (let i = 0; i < n; i++) {
+      if (i > 0) lineParts.push(SEP);
+      lineParts.push(buildOne(items[i]));
+    }
+    const line = lineParts.join("");
+    if (dw(line) <= width) { chosen = [line]; break; }
+  }
+  return chosen;
+}
+
+function placeholderToday() {
+  if (!pendingPlaceholders.todayByModel) return null;
+  return muted(L_TODAY + " \u2026");
+}
+
 // ============================================================================
 // lifecycle — LAZY. Nothing runs until the TUI renders its first frame.
 // ============================================================================
@@ -855,6 +958,13 @@ function start() {
   fetchSessionOnce();
   sessionTimer = setInterval(fetchSessionOnce, SESSION_TTL_MS);
   if (typeof sessionTimer.unref === "function") sessionTimer.unref();
+
+  // v3.2: per-LLM-model totals since local 00:00. Today data changes
+  // only at minute granularity, so 60s polling is plenty. We also
+  // re-fire on day-rollover inside fetchTodayByModelOnce.
+  fetchTodayByModelOnce();
+  const todayTimer = setInterval(fetchTodayByModelOnce, TODAY_TTL_MS);
+  if (typeof todayTimer.unref === "function") todayTimer.unref();
 }
 
 globalThis.__mcodeQuotaStart = start;
@@ -1000,10 +1110,18 @@ const buildPatchRender = (runtimeProp, shellStateProp) => {
   let body = "render(e){let r=super.render(e);";
   if (safeRuntime) body += `if(this&&this.${safeRuntime})globalThis.__mcodeRuntime=this.${safeRuntime};`;
   if (safeShell) body += `if(this&&this.${safeShell})globalThis.__mcodeShellState=this.${safeShell};`;
+  // PATCH_RENDER element budget: mcode's framework clips the return
+  // array to 4 elements (parent class Xc returns ["", r] — 2 elements
+  // — plus 2 of ours in the legacy layout). To fit the v3.2 today
+  // row (3 of our lines: 4-chunk + 5h/week + today), we drop the
+  // leading "" from super's return. The visual gap it created is
+  // subsumed by the natural line break between our content and the
+  // prompt below.
   body +=
     `globalThis.__mcodeQuotaWidget=this;` +
-    `if(Array.isArray(r)){let _qr=typeof globalThis.__mcodeQuotaRender==="function"` +
-    `?globalThis.__mcodeQuotaRender(e):[];if(Array.isArray(_qr)&&_qr.length>0)return[...r,..._qr]}return r}`;
+    `let _qr=typeof globalThis.__mcodeQuotaRender==="function"` +
+    `?globalThis.__mcodeQuotaRender(e):[];` +
+    `if(Array.isArray(r)&&Array.isArray(_qr)&&_qr.length>0){return r.slice(1).concat(_qr)}return r}`;
   return body;
 };
 

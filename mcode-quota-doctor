@@ -175,58 +175,26 @@ if [[ -f "$SIDECAR" ]]; then
   else
     warn "live render produced no quota line (mmx may be down). Raw: $(printf '%s' "$CLEAN" | head -c120)"
   fi
-  if printf '%s' "$WIDE" | grep -q "会话 tokens"; then
-    ok "session tokens line: $(printf '%s' "$WIDE" | grep -o '会话 tokens[^│]*' | head -1 | cut -c1-60)"
+  if printf '%s' "$CLEAN" | grep -q "今日"; then
+    if printf '%s' "$CLEAN" | grep -qE "今日 「[^」]+」 [0-9.]+[KM]"; then
+      ok "today-by-model: $(printf '%s' "$CLEAN" | grep -oE '今日 「[^」]+」 [0-9.]+[KM]' | head -1 | cut -c1-50)"
+    else
+      info "today row present but no model data yet (sqlite has no usage for today)"
+    fi
   else
-    info "session tokens line not present (no session row yet?)"
-  fi
-  if printf '%s' "$WIDE" | grep -q "输入"; then
-    ok "breakdown shown at 200 cols: $(printf '%s' "$WIDE" | grep -o '输入 [^)]*' | head -1 | cut -c1-52)"
-  elif [[ "${MCODE_QUOTA_TAIL:-}" == "compact" ]]; then
-    info "breakdown omitted (MCODE_QUOTA_TAIL=compact)"
-  else
-    warn "breakdown missing at 200 cols (expected 输入/输出/缓存)"
-  fi
-  if printf '%s' "$NARROW" | grep -q "输入"; then
-    ok "breakdown kept at 100 cols (>= 80 threshold)"
-  elif [[ "${MCODE_QUOTA_TAIL:-}" == "compact" ]]; then
-    info "breakdown omitted (MCODE_QUOTA_TAIL=compact)"
-  else
-    warn "breakdown missing at 100 cols (>= 80 threshold should keep it)"
-  fi
-  if printf '%s' "$CLEAN" | grep -q "上下文 21% 「42.0K/200.0K」"; then
-    ok "context usage: $(printf '%s' "$CLEAN" | grep -o '上下文 \S*21% 「[^」]*」' | head -1)"
-  else
-    warn "context usage chunk missing (expected 上下文 21% 「42.0K/200.0K」)"
-  fi
-  if printf '%s' "$CLEAN" | grep -q "缓存命中"; then
-    ok "cache hit rate: $(printf '%s' "$CLEAN" | grep -o '缓存命中 [0-9]*%' | head -1)"
-  else
-    warn "cache hit rate missing (expected 缓存命中 NN%)"
-  fi
-  if printf '%s' "$CLEAN" | grep -q "轮数 "; then
-    ok "turn count: $(printf '%s' "$CLEAN" | grep -o '轮数 [0-9]*' | head -1)"
-  else
-    warn "turn count missing (expected 轮数 NN)"
+    warn "today row missing (expected 今日 「model」 X.XM)"
   fi
   if printf '%s' "$CLEAN" | grep -q "│"; then
     ok "separator is │ (U+2502)"
   else
     warn "separator is not │"
   fi
-  # Section contract (v2.5): the quota block has two rows on the wide layout:
-  # 会话 tokens + 上下文 is on TOP (closest to the mcode status bar above it);
-  # the token-usage row (小时会话窗口 / 周限制使用量) is BELOW.
-  WIDE_LINES="$(printf '%s' "$WIDE" | awk '/会话 tokens/{f=1} f{print; if(/周限制使用量|小时会话窗口/) {found=1; exit}}')"
-  if printf '%s' "$WIDE_LINES" | head -1 | grep -q "会话 tokens"; then
-    ok "section contract: 会话 tokens row first (closest to mcode status bar)"
+  # Section contract (v3.2): the quota block has ONE line (5h/周 + 今日).
+  # 4-chunk was removed to make room for the today row — see DECISIONS D28.
+  if printf '%s' "$WIDE" | grep -q "小时会话窗口" && printf '%s' "$WIDE" | grep -q "周限制使用量"; then
+    ok "section contract: 5h/周 bars present (小时会话窗口 + 周限制使用量)"
   else
-    warn "section contract violated: 会话 tokens should be the first line"
-  fi
-  if printf '%s' "$WIDE_LINES" | grep -q "小时会话窗口\|周限制使用量"; then
-    ok "section contract: token-usage row below (小时会话窗口 / 周限制使用量)"
-  else
-    warn "section contract violated: token-usage row should be below"
+    warn "section contract violated: 5h/周 bars should be present"
   fi
 fi
 

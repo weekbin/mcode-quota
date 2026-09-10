@@ -2,6 +2,55 @@
 
 记录每次对工具集的修改。新条目加在最上面。
 
+## 2026-09-10 — v3.2.0：今日按 LLM 模型 token 统计
+
+### 诉求
+
+> 我想增加一个显示在小时会话和周限制使用量的下方，显示一个统计，今天用过什么模型，
+> 每个模型消耗了多少 token 的统计。
+
+数据源 `local_runtime_message_rows.data_json.context_usage_telemetry.model`
+关联到 `local_runtime_token_usage.turn_id`（`token_usage.model` 列在 0.3.11
+始终为 NULL，只能走 message rows 的 JSON）。
+
+### 变更
+
+- 新增 `fetchTodayByModelFromSqlite()`：取本地 00:00 起的 turn_id→model 映射，
+  聚合 token_usage，按 LLM 模型分组
+- 新增 `renderTodayByModelRow(width)`：响应式（宽屏多模型，窄屏 top-N），
+  输出 `今日 「model」 X.XM`
+- 60s 轮询（`TODAY_TTL_MS`），跨日自动刷新
+- 数据源与 mmx 独立：mmx 失败时 today 仍能出
+
+### 布局妥协（D28）
+
+mcode 0.3.11 launcher 的 render 框架只接受 **2 元素**（super.r + 1 行 ours），
+3 个我们的行会被裁掉 1 个。原计划 4-chunk + 5h/周 + 今日 三行装不下。
+
+**最终布局**：5h/周 + 今日 合并为同一行（wide 模式去掉 reset times 让行变短）。
+4-chunk 行（会话 tokens / 上下文 / 缓存命中 / 轮数）整体移除。
+
+显示示例（140 列）：
+```
+小时会话窗口 [██████████████░░░░░░] 69% 剩余 │ 周限制使用量 [███████████████████░] 94% 剩余 │ 今日 「MiniMax-M3」 705.8M
+```
+
+回退（窄屏或两行 stacked）：`mcodex` 还是显示 5h/周 stacked，today 静默退到
+placeholderToday()。
+
+### 抗升级
+
+`fetchTodayByModelFromSqlite()` 用 SQL `json_extract` 在
+`local_runtime_message_rows` 上（该表有 `created_at_ms` 普通索引），数据量 30K 行
+时单次查询 < 100ms。schema 漂移被 try/catch 兜住，today 行最多回退到不显示。
+
+### 验证
+
+- 真实 pty 140 列：今日 行 re-paint 正常（不再是首次 frame 后就消失）
+- doctor 19/0/0
+- smoke 25/25
+- mcode 本体 0 字节修改
+
 ## 2026-09-10 — v3.1.0：patches/ 版本目录机制 + 测试目录化
 
 ### 动机

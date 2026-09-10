@@ -46,9 +46,15 @@
 ## 文件 sha256
 
 ```
-06adb531dbc90864cc3a4b1ce0c16342963ba471b2edb950efc704f195b8f85a  mcode-patch-quota.mjs
+8ed0cabca7166d2319522954d27924c5f9fc8074b4660e77012d17c34ba8aaf0  mcode-patch-quota.mjs
 b2940f549ccfd703fd3938294c1c492d7dae61c1776b21bcfe1368263398d022  mcode-find-anchors.mjs
 ```
 
 **与 0.3.10 完全相同**（byte-identical）—— 证明 widget 自身没改，patcher 可共用。
-未来分叉时这里改成新 hash 并标注"diverged from 0.3.10 @ <old sha>"。
+
+**v3.2 变化**：
+- patcher 加了"今日按 LLM 模型"统计行（数据源 `local_runtime_message_rows.data_json.context_usage_telemetry.model` 关联到 token_usage）
+- 4-chunk 行 (会话 tokens / 上下文 / 缓存命中 / 轮数) 移除，5h/周 + 今日 合并为 1 行
+- PATCH_RENDER 加 `r.slice(1)` drop super 的前导 "" 让我们的 1 行 装得下
+
+未来分叉时这里改成新 hash 并标注"diverged from 0.3.10 @ 8ed0cabc..."。

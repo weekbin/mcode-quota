@@ -39,6 +39,7 @@ CHANGELOG 讲**改了什么**。
 | D25 | 注入逻辑去硬编码 | 5 特征 / 属性名 / SQL 列全 AST 化 + 容错链 + 升级回归 | 5 特征里有 3 个硬编码属性名；PATCH_RENDER / SQL 全硬编码 | v3.0.0 |
 | D26 | async 副作用必须挂 `.catch` | 同步 `try/catch` 抓不到 async reject；必须显式挂 `.catch(()=>{})` 让 Promise 永不能升级 unhandledRejection | v3.0.0 的 `getContextSnapshot()` 无参调用导致 mcode 0.3.10 `TUI stopped unexpectedly` | v3.0.1 |
 | D27 | patcher 按 mcode 版本分目录 | `patches/<v>/mcode-patch-quota.mjs` + `_loader.mjs` 按 `--current` 选目录，找不到精确匹配时回退到最近 `<=` 版本 | 单 patcher 文件让"老 mcode 用户拉新 master"不匹配、git history 把 0.3.10/0.3.11 决策混在一根 branch | v3.1.0 |
+| D28 | mcode render 框架只接受 2 元素，today 行必须合并入 5h/周 | `super.render` 返 `["", r]`，加上我们的 3 行 = 5 元素被框架裁到 4；drop `""` 缩到 4，再裁到 2。最终 `topRows[0] + SEP + todayRow` 合并为 1 行；`topRows.length === 1 && todayRow` 守卫避免在 5h/周 stacked 时合并 | 4-chunk + 5h/周 + 今日 三行 装不下。最初试了 `[...r, ..._qr]` 数组路线，结果 today 在第二帧后消失。反复试错后定位到 mcode framework 的硬限制 | v3.2.0 |
 
 ---
 
@@ -557,6 +558,48 @@ patcher。
 - `mcode-quota-doctor` 加 loader 选择行（精确 vs fallback）
 - `tests/mcode-smoke.mjs` 从 live launcher 路径推断 mcode 版本，自动选对应 patches/ 目录
 - `mcodex-push-remote` 不变（patches/ 在仓库根下，自动随同步走）
+
+### D28 — mcode render 框架只接受 2 元素，today 行必须合并入 5h/周
+
+**背景**：v3.2.0 加今日按 LLM 模型统计行时，原计划布局是 4-chunk + 5h/周 + 今日 三行。
+mcode 0.3.11 的 launcher widget 父类 `Xc.render` 返 `["", r]`（2 元素），加上我们
+的 3 行 = 5 元素返回给 framework。但 framework 实际只渲染前 2 个元素。
+
+**反复试错**：
+
+1. 最初以为 framework 接受 4 元素，于是 `r.slice(1).concat(_qr)` 把 5 元素
+   压成 4 —— 仍然 today 不显示。
+2. 加 `process.stderr.write` debug 探到 framework **真的只接受 2 元素**。
+3. 试了两条路：
+   - (a) drop 4-chunk，5h/周 stacked (2 行) + 今日 (1 行) = 3 行 → 仍超 2
+   - (b) drop 4-chunk，5h/周 单行 (1 行) + 今日 (1 行) = 2 行 → 但用户要求 5h/周 带 reset times，单行放不下
+4. 最终方案：**5h/周 (单行) + 今日 (单行) 合并为同一行**。先试带 reset times 的合并
+   (`topRows[0] + SEP + todayRow`)，超 140 列；fallback 到 noReset 合并，能装下。
+   代价：5h/周 失去 reset times (`重置 Xh Ym`)。
+
+**当前 layout**（140 列实测）：
+```
+小时会话窗口 [██████████████░░░░░░] 69% 剩余 │ 周限制使用量 [███████████████████░] 94% 剩余 │ 今日 「MiniMax-M3」 705.8M
+```
+
+**用户选择**：
+- 用户原话要求"分两行" + "今日 ... 放在 [...] 下方"
+- 实际产出：1 行（5h/周 + 今日 用 SEP 连）
+- 取舍：信息可见（用户能看到今日用了什么模型），代价是位置妥协（同行而非下方）
+
+**未做**：
+
+- ❌ 重置时间 + today 同时保留在 5h/周 行（5h 字符 + reset ≈ 25 列，加 SEP + 今日
+  ≈ 30 列，5h/周 本身已经 100+ 列，加一起超 140）
+- ❌ 强行让 framework 接受 3 元素（要改 mcode 父类 Xc.render —— 违反"mcode 本体
+  0 字节修改"约束）
+- ❌ 让用户接受 3 行（frame 1 后 today 就消失，行为更差）
+
+**未来可能性**：
+
+- mcode 升级若改 framework 接受 N+3 元素，可恢复"5h/周 stacked + 今日 单独行"布局
+- 当前 layout 在窄屏（< 130 列）会 fall back 到 5h/周 stacked + 无 today —— 用户
+  在窄屏会暂时看不到今日；可接受
 
 ## 3. 明确不做 / 否决清单
 
