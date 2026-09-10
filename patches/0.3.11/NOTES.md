@@ -46,7 +46,7 @@
 ## 文件 sha256
 
 ```
-505c22bee77d6e00c6d97989d2807df926c09f1137b009579139e35538ea8c24  mcode-patch-quota.mjs
+2394571654d40d6069b98dc433ef7844f37b9b606274c591ad65457041dc4153  mcode-patch-quota.mjs
 b2940f549ccfd703fd3938294c1c492d7dae61c1776b21bcfe1368263398d022  mcode-find-anchors.mjs
 ```
 
@@ -55,7 +55,10 @@ b2940f549ccfd703fd3938294c1c492d7dae61c1776b21bcfe1368263398d022  mcode-find-anc
 **v3.2 变化**：
 - patcher 加了"今日按 LLM 模型"统计行（数据源 `local_runtime_message_rows.data_json.context_usage_telemetry.model` 关联到 token_usage）
 - 布局重做为 3 行独立：4-chunk (会话 tokens / 上下文 / 缓存命中 / 轮数) + 5h/周 + 今日
+- v3.2.4：注入点 try/catch 兜底（D29.1）；today 查询改 rowid 增量（D29.2）；
+  窄屏 model 名按宽度预算截断；session 抓取 in-flight 守卫（带 15s 年龄上限）；
+  sidecar 原子写入 + 内容相同时跳过；loader 用 fileURLToPath
 - PATCH_RENDER 用 v3.0.0 风格 `[...r, ..._qr]`（首版 ship 用的 `r.slice(1).concat(_qr)` 被推翻，见 DECISIONS.md D28）
 - 4-chunk 行恢复（首版 ship 删掉的，用户反馈需要）
 
-未来分叉时这里改成新 hash 并标注"diverged from 0.3.11 @ 505c22be..."。
+未来分叉时这里改成新 hash 并标注"diverged from 0.3.11 @ 23945716..."。

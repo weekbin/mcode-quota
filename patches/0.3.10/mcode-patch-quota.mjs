@@ -32,7 +32,7 @@
 // path skips all work when the fork is already correct.
 
 import { readFileSync, writeFileSync, existsSync, readdirSync,
-         mkdirSync, rmSync, cpSync } from "node:fs";
+         mkdirSync, rmSync, cpSync, renameSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -88,8 +88,9 @@ import { existsSync } from "node:fs";
 const CACHE_TTL_MS = Number(process.env.MCODE_QUOTA_TTL_MS || 60_000);
 const FETCH_TIMEOUT_MS = 20_000;
 const SESSION_TTL_MS = 10_000;
-const TODAY_TTL_MS = 60_000;       // daily stats — 60s is fine, no need to pound sqlite
+const TODAY_TTL_MS = Number(process.env.MCODE_QUOTA_TODAY_TTL_MS || 60_000); // daily stats — 60s is fine, no need to pound sqlite
 const REFRESH_MIN_INTERVAL_MS = 500;
+const SESSION_FETCH_MAX_AGE_MS = 15_000;  // supersede a stuck session fetch
 
 let raw = { valid: false, dRem: null, dReset: "", wRem: null, wReset: "", fetchedAt: 0, lastSuccessAt: 0 };
 let session = { valid: false, total: 0, input: 0, output: 0, cache: 0, reasoning: 0, sessionId: null, fetchedAt: 0, turns: 0, cacheHit: null, source: null };
@@ -99,8 +100,18 @@ let session = { valid: false, total: 0, input: 0, output: 0, cache: 0, reasoning
 // local_runtime_token_usage is NULL in 0.3.11, so the join via message
 // rows is the only path that has the LLM model name today.
 let today = { valid: false, items: [], fetchedAt: 0, dayStartMs: 0 };
+// Incremental scan state for the today-by-model query. local_runtime_message_rows
+// has no created_at_ms index and ~5 KB data_json rows, so a time-filtered scan
+// costs ~85 ms on a long-lived install and grows. We warm once per day with the
+// time-filtered scan, then poll off the monotonic rowid (id > lastId), which
+// SQLite serves as a primary-key range SEARCH (~0.4-2 ms). See D29.
+let todayScan = { dayStartMs: 0, lastId: 0, turnToModel: new Map(), warmed: false, hasRowId: null };
 let started = false;
 let sessionTimer = null;
+let todayTimer = null;
+let sessionFetchInFlight = false;
+let sessionFetchStartedAt = 0;
+let lastCtxProbeAt = 0;
 let lastRefreshAt = 0;
 // Track which data sources have not yet been filled on the first paint, so
 // the renderer can show a muted "…" placeholder instead of an empty cell.
@@ -135,12 +146,21 @@ const L_TODAY = "\u4eca\u65e5";                                   // 今日
 // GGUF 文件名 / 自定义 fine-tune 名经常超过 30 字符。超过 MAX_MODEL_NAME_CHARS
 // 时保留前 60% + 「…」 + 后 40%，让 family 名（开头）和版本/量化（结尾）都还能看到。
 const MAX_MODEL_NAME_CHARS = 32;
+const MIN_MODEL_NAME_CHARS = 8;
 const ELLIPSIS = "\u2026";
-function shortenModelName(name) {
-  if (!name || name.length <= MAX_MODEL_NAME_CHARS) return name;
-  // head = 60% of budget, tail = 40% of budget, -1 for the ellipsis
-  const tail = Math.max(4, Math.floor(MAX_MODEL_NAME_CHARS * 0.4));
-  const head = MAX_MODEL_NAME_CHARS - tail - 1;
+// budget is optional: when the caller knows how many columns it can spend
+// (narrow terminal, other models on the same row) it passes a smaller value
+// so the name shrinks with the space instead of overflowing and taking the
+// whole row down with it.
+function shortenModelName(name, budget) {
+  let max = MAX_MODEL_NAME_CHARS;
+  if (typeof budget === "number" && Number.isFinite(budget)) {
+    max = Math.max(MIN_MODEL_NAME_CHARS, Math.min(MAX_MODEL_NAME_CHARS, Math.floor(budget)));
+  }
+  if (!name || name.length <= max) return name;
+  // tail = 40% of budget (min 3), head = the rest minus the ellipsis column
+  const tail = Math.max(3, Math.floor(max * 0.4));
+  const head = Math.max(1, max - tail - 1);
   return name.slice(0, head) + ELLIPSIS + name.slice(name.length - tail);
 }
 
@@ -315,7 +335,13 @@ function readContextUsage() {
     const sid = globalThis.__mcodeShellState?.agentSessionId
       || globalThis.__mcodeRuntime?.agentSessionId
       || null;
-    if (sid && typeof rt?.getContextSnapshot === "function") {
+    // Throttle: this function runs on every render frame (dozens of times a
+    // second). Probing the runtime on each frame allocates a Promise per
+    // call and makes mcode do work per frame. 2 s is far below the rate at
+    // which the context budget visibly changes.
+    const nowMs = Date.now();
+    if (sid && nowMs - lastCtxProbeAt >= 2000 && typeof rt?.getContextSnapshot === "function") {
+      lastCtxProbeAt = nowMs;
       try {
         const maybe = rt.getContextSnapshot(sid);
         // Always catch, even when we don't use the value, so the rejection
@@ -828,6 +854,28 @@ async function fetchSessionOnce() {
   const sessionId = shell.agentSessionId;
   if (!sessionId) return;
   if (session.sessionId === sessionId && Date.now() - session.fetchedAt < SESSION_TTL_MS) return;
+  // In-flight guard. The render hook re-kicks this whenever session.sessionId
+  // is not yet populated — which is true for every frame until the first
+  // fetch resolves. Without this, one render burst launches N concurrent
+  // fetches that all hit sqlite, and the last writer wins arbitrarily.
+  //
+  // Age-bounded on purpose: if a fetch never settles (a hung
+  // getSessionUsageSummary promise would leave Promise.allSettled pending),
+  // a plain boolean would latch true and silently disable session updates
+  // for the rest of the process. After SESSION_FETCH_MAX_AGE_MS we let a
+  // newer attempt supersede the stuck one.
+  const startedAt = Date.now();
+  if (sessionFetchInFlight && startedAt - sessionFetchStartedAt < SESSION_FETCH_MAX_AGE_MS) return;
+  sessionFetchInFlight = true;
+  sessionFetchStartedAt = startedAt;
+  try {
+    await _fetchSessionOnceInner(sessionId, runtime);
+  } finally {
+    if (sessionFetchStartedAt === startedAt) sessionFetchInFlight = false;
+  }
+}
+
+async function _fetchSessionOnceInner(sessionId, runtime) {
 
   // Race the runtime API and the sqlite fallback in parallel. The runtime
   // call is in-process and usually fast but occasionally returns zeros
@@ -901,6 +949,7 @@ async function fetchTodayByModelFromSqlite() {
       if (sqliteDb) { try { sqliteDb.close(); } catch {} }
       sqliteDb = new DatabaseSync(SQLITE_DEFAULT_PATH, { readOnly: true });
       sqliteDbPath = SQLITE_DEFAULT_PATH;
+      todayScan = { dayStartMs: 0, lastId: 0, turnToModel: new Map(), warmed: false, hasRowId: null };
     }
     // Local midnight today, in JS milliseconds. token_usage.ts is also
     // milliseconds (Unix epoch * 1000).
@@ -909,27 +958,91 @@ async function fetchTodayByModelFromSqlite() {
     const dayStartMs = dayStart;
     const dayEndMs = dayStartMs + 86400 * 1000;
 
-    // 1) turn_id -> LLM model name from assistant message rows.
-    //    The data_json blob is small per row; the predicate is indexed by
-    //    the (session_id, msg_id) unique index plus a row scan on
-    //    created_at_ms.  We only look at today's rows.
-    const msgRows = sqliteDb.prepare(
-      "SELECT turn_id, " +
-        "json_extract(data_json, '$.context_usage_telemetry.model') AS model " +
-      "FROM local_runtime_message_rows " +
-      "WHERE role = 'assistant' " +
-        "AND turn_id IS NOT NULL " +
-        "AND created_at_ms >= ? " +
-        "AND created_at_ms < ? " +
-        "AND json_extract(data_json, '$.context_usage_telemetry.model') IS NOT NULL"
-    ).all(dayStartMs, dayEndMs);
-
-    const turnToModel = new Map();
-    for (const r of msgRows) {
-      if (r.turn_id && r.model) turnToModel.set(r.turn_id, r.model);
+    // Day rollover (or first run): drop yesterday's map and force a
+    // time-filtered re-scan below.
+    if (todayScan.dayStartMs !== dayStartMs) {
+      todayScan = { dayStartMs: dayStartMs, lastId: 0, turnToModel: new Map(), warmed: false, hasRowId: todayScan.hasRowId };
     }
 
-    // 2) Aggregate token_usage today per model.
+    // 1) turn_id -> LLM model name from assistant message rows.
+    //
+    // PERF: local_runtime_message_rows has NO index on created_at_ms, and
+    // data_json averages ~5 KB/row (hundreds of MB for a long-lived
+    // install). A time-filtered scan therefore touches every row and
+    // parses every JSON blob: measured 85 ms on a 59 K-row / 283 MB table,
+    // and it grows linearly. Because this runs synchronously on the TUI
+    // event loop every 60 s, that is a visible hitch that only gets worse.
+    //
+    // Fix: warm once per day with the time-filtered scan, then poll
+    // incrementally off the rowid. id is INTEGER PRIMARY KEY
+    // AUTOINCREMENT, so it is strictly monotonic across inserts; a
+    // rowid range scan (id > ?) is a SEARCH on the primary-key B-tree
+    // instead of a table SCAN — 0.4-2 ms instead of 85 ms.
+    //
+    // Correctness: no row can later appear with an id <= lastId (ids are
+    // monotonic), so "new rows" == "id > lastId". Rows written with a
+    // stale created_at_ms would only add a turn->model mapping whose
+    // token_usage.ts is outside today, and those turns are not aggregated
+    // anyway.
+    //
+    // Upgrade-resilience: id is probed via PRAGMA before use. If a
+    // future mcode drops or renames it, we fall back to the original
+    // time-filtered scan.
+    if (todayScan.hasRowId === null) {
+      try {
+        const info = sqliteDb.prepare("PRAGMA table_info(local_runtime_message_rows)").all();
+        todayScan.hasRowId = info.some((c) => c.name === "id" && (c.pk === 1 || c.pk === "1"));
+      } catch {
+        todayScan.hasRowId = false;
+      }
+    }
+    const MODEL_EXPR = "json_extract(data_json, '$.context_usage_telemetry.model')";
+    if (!todayScan.turnToModel) todayScan.turnToModel = new Map();
+    if (todayScan.warmed && todayScan.hasRowId) {
+      const newRows = sqliteDb.prepare(
+        "SELECT id, turn_id, " + MODEL_EXPR + " AS model " +
+        "FROM local_runtime_message_rows " +
+        "WHERE id > ? " +
+          "AND role = 'assistant' " +
+          "AND turn_id IS NOT NULL " +
+          "AND " + MODEL_EXPR + " IS NOT NULL"
+      ).all(todayScan.lastId);
+      for (const r of newRows) {
+        if (typeof r.id === "number" && r.id > todayScan.lastId) todayScan.lastId = r.id;
+        if (r.turn_id && r.model) todayScan.turnToModel.set(r.turn_id, r.model);
+      }
+    } else {
+      // Warm scan: one time-filtered pass, then go incremental.
+      const warmRows = sqliteDb.prepare(
+        "SELECT turn_id, " + MODEL_EXPR + " AS model " +
+        "FROM local_runtime_message_rows " +
+        "WHERE role = 'assistant' " +
+          "AND turn_id IS NOT NULL " +
+          "AND created_at_ms >= ? " +
+          "AND created_at_ms < ? " +
+          "AND " + MODEL_EXPR + " IS NOT NULL"
+      ).all(dayStartMs, dayEndMs);
+      todayScan.turnToModel = new Map();
+      for (const r of warmRows) {
+        if (r.turn_id && r.model) todayScan.turnToModel.set(r.turn_id, r.model);
+      }
+      if (todayScan.hasRowId) {
+        // Anchor lastId at the newest row currently in the table so the
+        // next poll starts from "now" instead of re-reading history.
+        try {
+          const row = sqliteDb.prepare("SELECT MAX(id) AS m FROM local_runtime_message_rows").get();
+          todayScan.lastId = Number(row && row.m) || 0;
+        } catch {
+          todayScan.lastId = 0;
+          todayScan.hasRowId = false;   // stay on the warm path
+        }
+      }
+      todayScan.warmed = true;
+    }
+    const turnToModel = todayScan.turnToModel;
+
+    // 2) Aggregate token_usage today per model. ts has a dedicated index
+    //    (idx_local_runtime_token_usage_ts), so this stays ~2 ms.
     const tokRows = sqliteDb.prepare(
       "SELECT turn_id, session_id, " +
         "input_tokens, output_tokens, cache_read_tokens, cache_write_tokens " +
@@ -1021,6 +1134,24 @@ function renderTodayByModelRow(width) {
     const line = lineParts.join("");
     if (dw(line) <= width) { chosen = [line]; break; }
   }
+  if (chosen.length === 0 && items.length > 0) {
+    // Even a single model at the default budget overflows (narrow terminal,
+    // long custom name). The fixed 32-char cap is what pushed the row over,
+    // so shrink the name to whatever space is left. An empty row loses the
+    // information entirely; a terse one still answers "which model ran today".
+    // Layout overhead is fixed: "今日 " + 「 + 」 + " " + total.
+    const first = items[0];
+    const totalStr = fmtTok(first.total);
+    const overhead = dw(label(L_TODAY) + " ") + 4 + 1 + dw(totalStr);
+    const budget = width - overhead;
+    if (budget >= MIN_MODEL_NAME_CHARS) {
+      const modelStr = shortenModelName(first.model, budget);
+      const line = label(L_TODAY) + " " +
+        "\u300c" + label(modelStr) + "\u300d " +
+        ESC + C_SUCCESS + "m" + totalStr + RESET_SEQ;
+      if (dw(line) <= width) chosen = [line];
+    }
+  }
   return chosen;
 }
 
@@ -1049,7 +1180,7 @@ function start() {
   // only at minute granularity, so 60s polling is plenty. We also
   // re-fire on day-rollover inside fetchTodayByModelOnce.
   fetchTodayByModelOnce();
-  const todayTimer = setInterval(fetchTodayByModelOnce, TODAY_TTL_MS);
+  todayTimer = setInterval(fetchTodayByModelOnce, TODAY_TTL_MS);
   if (typeof todayTimer.unref === "function") todayTimer.unref();
 }
 
@@ -1196,17 +1327,27 @@ const buildPatchRender = (runtimeProp, shellStateProp) => {
   let body = "render(e){let r=super.render(e);";
   if (safeRuntime) body += `if(this&&this.${safeRuntime})globalThis.__mcodeRuntime=this.${safeRuntime};`;
   if (safeShell) body += `if(this&&this.${safeShell})globalThis.__mcodeShellState=this.${safeShell};`;
-  // PATCH_RENDER element budget: mcode's framework clips the return
-  // array to 4 elements (parent class Xc returns ["", r] — 2 elements
-  // — plus 2 of ours in the legacy layout). To fit the v3.2 today
-  // row (3 of our lines: 4-chunk + 5h/week + today), we drop the
-  // leading "" from super's return. The visual gap it created is
-  // subsumed by the natural line break between our content and the
-  // prompt below.
+  // v3.2.4 P0: the sidecar call MUST be wrapped in try/catch. If
+  // __mcodeQuotaRender throws (a null deref on an unexpected shellState
+  // shape, a sqlite surprise, a formatting edge case), the exception
+  // propagates out of render() into Ink's reconciler with no error
+  // boundary above it, and the whole TUI dies. Verified empirically:
+  // an injected throw produces a 268-byte run and the process exits
+  // immediately. A failed quota line must degrade to "no extra lines",
+  // never to "your session is gone".
+  //
+  // Element budget: the framework accepts any number of elements.
+  // Parent class Xc returns ["", r] (2), and we append our 3 rows
+  // (4-chunk / 5h-week / today), so 5 elements are painted on
+  // independent rows. See DECISIONS D28. No slicing: [...r, ..._qr]
+  // keeps super's leading "" and its spacing.
   body +=
     `globalThis.__mcodeQuotaWidget=this;` +
-    `let _qr=typeof globalThis.__mcodeQuotaRender==="function"` +
-    `?globalThis.__mcodeQuotaRender(e):[];` +
+    `let _qr=[];` +
+    `try{` +
+    `if(typeof globalThis.__mcodeQuotaRender==="function")_qr=globalThis.__mcodeQuotaRender(e)||[]` +
+    `}catch(_qe){_qr=[];` +
+    `try{globalThis.__mcodeQuotaLastError=String(_qe&&_qe.stack||_qe)}catch(_){}}` +
     `if(Array.isArray(r)&&Array.isArray(_qr)&&_qr.length>0){return[...r,..._qr]}return r}`;
   return body;
 };
@@ -1330,7 +1471,27 @@ function main() {
 
   const sidecarDir = dirname(SIDECAR_PATH);
   if (!existsSync(sidecarDir)) mkdirSync(sidecarDir, { recursive: true });
-  writeFileSync(SIDECAR_PATH, SIDECAR_BODY, "utf-8");
+  // Skip the write when the content already matches: the fork's cli.js
+  // imports this file by absolute path, so rewriting it on every launch is
+  // pure churn (and changes the mtime each time).
+  let sidecarChanged = true;
+  try {
+    sidecarChanged = readFileSync(SIDECAR_PATH, "utf-8") !== SIDECAR_BODY;
+  } catch { /* absent or unreadable -> write it */ }
+  if (sidecarChanged) {
+    // Write-then-rename: concurrent `mcodex` launches must never let one
+    // process import a half-written module. rename(2) is atomic on POSIX,
+    // so a reader sees either the old file or the complete new one.
+    const tmpSidecar = SIDECAR_PATH + ".tmp" + process.pid;
+    writeFileSync(tmpSidecar, SIDECAR_BODY, "utf-8");
+    try {
+      renameSync(tmpSidecar, SIDECAR_PATH);
+    } catch (e) {
+      try { rmSync(tmpSidecar, { force: true }); } catch {}
+      log(`sidecar rename failed: ${e.message}`);
+      process.exit(1);
+    }
+  }
   try {
     execFileSync(process.execPath, ["--check", SIDECAR_PATH], { stdio: "pipe" });
   } catch (e) {

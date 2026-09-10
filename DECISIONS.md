@@ -40,6 +40,7 @@ CHANGELOG 讲**改了什么**。
 | D26 | async 副作用必须挂 `.catch` | 同步 `try/catch` 抓不到 async reject；必须显式挂 `.catch(()=>{})` 让 Promise 永不能升级 unhandledRejection | v3.0.0 的 `getContextSnapshot()` 无参调用导致 mcode 0.3.10 `TUI stopped unexpectedly` | v3.0.1 |
 | D27 | patcher 按 mcode 版本分目录 | `patches/<v>/mcode-patch-quota.mjs` + `_loader.mjs` 按 `--current` 选目录，找不到精确匹配时回退到最近 `<=` 版本 | 单 patcher 文件让"老 mcode 用户拉新 master"不匹配、git history 把 0.3.10/0.3.11 决策混在一根 branch | v3.1.0 |
 | D28 | mcode render 框架接受任意多元素；3 行布局可用 | `super.render` 返 `["", r]`（2 元素），PATCH_RENDER 用 v3.0.0 风格 `[...r, ..._qr]` 把 2 + 3 = 5 元素全推给 framework，pty 实测全部 paint。首版 ship 误判 framework 裁到 2，是因为用 stderr debug 误读了 framework 控制流；改 file-based log 后确认 5 元素都画 | v3.2.0 重做后 |
+| D29 | 注入点的异常必须就地兜住；无索引大表的时间过滤查询改 rowid 增量 | (1) `PATCH_RENDER` 把 sidecar 调用包进 try/catch，catch 里 `_qr=[]` 降级 + 记录 `__mcodeQuotaLastError` —— 实测注入 throw：无守卫 268 B 即死 / 有守卫 12153 B rc=0。(2) `local_runtime_message_rows` 无 `created_at_ms` 索引 + 5 KB/行 data_json，时间过滤扫描 84.6 ms/次且同步阻塞事件循环；改用 `id > lastId` 增量（每天 warm 一次 89.9 ms），稳态 0.03 ms，`EXPLAIN` 确认走 rowid SEARCH。`id` 列用 PRAGMA 探测，缺失时回退时间过滤 | v3.2.4 |
 
 ---
 
@@ -805,8 +806,85 @@ log（`/tmp/mcodex-debug.log` 由 `MCODE_QUOTA_DEBUG_FILE=1` 触发），pty 抓
 - 单元 22 项断言全绿
 - 46–260 列扫描 0 溢出
 
+### D29 — 注入点异常必须就地兜住；today 查询走 rowid 增量
+
+**背景**：v3.2.4 对补丁策略与 SQL 做了一轮系统自检。两个结构性结论：
+
+#### D29.1 — 注入进 mcode 内部调用链的代码，异常必须就地兜住
+
+**问题**：`PATCH_RENDER` 把 `__mcodeQuotaRender(e)` 直接放在 `render(e)` 的
+返回值表达式里，没有 try/catch。我们的渲染代码一旦抛异常，异常穿过
+`render(e)` 进入 Ink 协调器；上层没有 error boundary → 整个 TUI 死。
+
+**候选**：
+
+| 方案 | 优点 | 缺点 |
+|---|---|---|
+| (a) 不处理，靠代码写对 | 零开销 | 一次边界就毁掉用户会话；无法穷举 mcode 未来返回的结构 |
+| (b) 在 sidecar 内部包 try/catch | 改动集中 | `__mcodeQuotaRender` 的*调用*本身仍可能抛（未来改签名、属性访问） |
+| (c) **在注入点（launcher）包 try/catch** | 覆盖面最大：无论 sidecar 怎么炸，注入点都是最后一道墙 | 每次 render 一个 try 块（可忽略） |
+
+**选 (c)**，并在 catch 里 `_qr=[]`（降级为"没有额外行"）+ 记录
+`globalThis.__mcodeQuotaLastError`。
+
+**证据**：同一个注入 throw，160 列 pty 跑 18 秒 —
+
+| | 输出 | 进程 |
+|---|---|---|
+| 无守卫 | 268 B | 首帧即死 |
+| 有守卫 | 12153 B | rc=0 |
+
+**原则**：任何被注入到宿主调用链里的代码，都必须假定宿主会在任意时刻
+传入任意结构；崩溃降级必须发生在注入点，而不是依赖被注入代码自己写对。
+这与 D26（async 副作用必须挂 catch）是同一类约束的同步版本。
+
+#### D29.2 — 无索引大表的时间过滤查询改用 rowid 增量
+
+**问题**：`local_runtime_message_rows` 没有 `created_at_ms` 索引，且
+`data_json` 平均 5 KB/行（本机 59 K 行 / 283 MB）。原 today 查询按时间
+过滤 → `EXPLAIN` 显示 `SCAN`（全表），实测 84.6–100 ms；因为是
+`DatabaseSync` 同步调用，直接阻塞 TUI 事件循环，且随安装时长线性恶化。
+
+**候选**：
+
+| 方案 | 评估 |
+|---|---|
+| (a) 给 mcode 的 runtime sqlite 加索引 | **否决** —— 修改 mcode 的数据文件，违反隔离原则，且可能与 mcode 自身 migration 冲突 |
+| (b) 先用 token_usage（有 ts 索引，1.6 ms）取今天的 turn_id，再回查 message_rows | 实测 48 ms，仅快 1.8×；37 个 session 各一条语句，prepare 开销占主导 |
+| (c) 预过滤 + CTE 两阶段 | 实测 85 ms，SQLite 不物化，无改善 |
+| (d) **rowid 范围增量** | 稳态 **0.03 ms**，比原方案快 ~2800× |
+
+**选 (d)**。`id INTEGER PRIMARY KEY AUTOINCREMENT` 严格单调，所以：
+- 每天 warm 一次（时间过滤扫描，89.9 ms，一天一次）
+- 之后 `WHERE id > lastId` —— `EXPLAIN` 确认 `SEARCH ... USING INTEGER
+  PRIMARY KEY (rowid>?)`，只碰新行
+
+**正确性**：不存在后插入更低 id 的行（AUTOINCREMENT 保证），所以
+"新行" ⇔ "id > lastId"。带陈旧 `created_at_ms` 的迟到行只会新增一条
+turn→model 映射，而它的 `token_usage.ts` 不在今天范围，本来就不聚合。
+
+**升级韧性**（呼应 D25）：`id` 先用 `PRAGMA table_info` 探测；未来 mcode
+改名/删除它 → 自动退回时间过滤扫描。已用无 `id` 列的合成 schema 验证。
+
+**未做**：
+
+- ❌ 给 runtime sqlite 加索引（改 mcode 数据）
+- ❌ 把 today 查询挪到 worker 线程（`DatabaseSync` 无异步 API；worker 通信
+  开销大于收益，且增量后已 0.03 ms）
+- ❌ 缓存整个 turn→model 映射到磁盘（进程内 Map 已够，跨天重置成本极低）
+
+**遗留观察**：
+
+- `summary = fromRuntime || fromSqlite`：runtime 返回部分非零值时
+  （`sumTotal > 0`）优先采用，忽略更完整的 sqlite。会话令牌单调递增，
+  若观察到偏差可改为取较大者。
+- `<unknown>` 桶（未匹配到 model 的 token）显示时被过滤；全历史占 0.01%。
+
 ### 观察中
 
 - mcode 若改动 TUI 状态栏结构（不再继承基类 / `render` 契约变化），需更新
   `mcode-find-anchors.mjs` 特征列表，见 `MAINTENANCE.md §5`
 - fork 每个版本约 62MB，版本累积后考虑清理旧 fork
+- mcode 若把 `local_runtime_message_rows.id` 改成非单调（例如 UUID 或重用
+  rowid），D29.2 的增量策略会失效 —— `PRAGMA` 探测只覆盖"列不存在"，
+  不覆盖"存在但非单调"。届时需改回时间过滤扫描或加进程内去重。

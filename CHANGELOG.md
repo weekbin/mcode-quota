@@ -2,6 +2,147 @@
 
 记录每次对工具集的修改。新条目加在最上面。
 
+## 2026-09-10 — v3.2.4：逻辑自检 —— 一个 P0 + SQL 性能重做
+
+对补丁策略与 SQL 做了一轮系统排查，发现并修复 4 个问题，其中 1 个会
+让用户的 TUI 直接崩掉。
+
+### P0：render 抛异常会杀死 TUI（已实测证实）
+
+`PATCH_RENDER` 里的 sidecar 调用没有任何异常保护：
+
+```js
+let _qr = typeof globalThis.__mcodeQuotaRender === "function"
+  ? globalThis.__mcodeQuotaRender(e) : [];
+```
+
+只要我们的渲染代码抛一次（对 mcode shellState 未预期结构的空指针、
+sqlite 意外、格式化边界），异常就会穿过 `render(e)` 进入 Ink 的协调器；
+上层没有 error boundary，整个 TUI 死掉。
+
+**实测对比**（同一个注入 throw，160 列 pty，18 秒）：
+
+| | 输出 | 进程 |
+|---|---|---|
+| 修复前 | 268 B（首帧即死） | 被杀 |
+| 修复后 | 12153 B（正常渲染 18 秒） | rc=0 |
+
+修复：把 sidecar 调用包进 `try/catch`，失败时 `_qr=[]` 降级为"没有额外行"，
+并把异常栈记到 `globalThis.__mcodeQuotaLastError` 方便诊断。
+配额行坏掉可以接受，用户的会话不能。
+
+### P1：today 查询全表扫描，每 60s 阻塞事件循环 85ms
+
+`local_runtime_message_rows` **没有 `created_at_ms` 索引**，而 `data_json`
+平均 5 KB/行（本机 59 K 行 / 283 MB）。原查询按时间过滤 → 全表扫描 + 对
+每一行 `json_extract`：
+
+```
+EXPLAIN QUERY PLAN → SCAN local_runtime_message_rows   (不是 SEARCH)
+实测 → 84.6-100 ms / 次
+```
+
+这是 `DatabaseSync` 同步调用，直接卡住 TUI 事件循环（60fps 下掉约 5 帧），
+而且随安装时长线性恶化。
+
+**修复**：利用 `id INTEGER PRIMARY KEY AUTOINCREMENT` 的单调性 ——
+每天 warm 一次（时间过滤扫描），之后改用 rowid 范围查询增量轮询：
+
+```sql
+-- warm（每天/进程启动一次）
+WHERE role='assistant' AND turn_id IS NOT NULL
+  AND created_at_ms >= ? AND created_at_ms < ? AND <model-expr> IS NOT NULL
+-- steady（每次轮询）
+WHERE id > ? AND role='assistant' AND turn_id IS NOT NULL AND <model-expr> IS NOT NULL
+```
+
+`EXPLAIN` 确认走 `SEARCH ... USING INTEGER PRIMARY KEY (rowid>?)`。
+
+| 阶段 | 修复前 | 修复后 |
+|---|---|---|
+| 每次轮询（稳态） | 84.6 ms | **0.03 ms**（典型）/ 0.54 ms（补 100 行） |
+| 每天一次（warm） | — | 89.9 ms |
+
+正确性依据：id 严格单调，故"新行" ⇔ "id > lastId"；不存在后插入更低 id 的行。
+带陈旧 `created_at_ms` 的迟到行只会加一条 turn→model 映射，而它的
+`token_usage.ts` 不在今天范围内，本来就不会被聚合。
+
+**升级韧性**（D25）：`id` 列先用 `PRAGMA table_info` 探测；若未来 mcode
+改名/删除它，自动退回时间过滤扫描。已用合成 schema（无 `id` 列）验证。
+
+### P2：窄屏下今日行整体消失
+
+`shortenModelName` 固定截到 32 字符，与终端宽度无关。若当天只有一个长名
+模型（如 56 字符的 GGUF 文件名），40 列表宽下整行放不下 → 直接不渲染：
+
+```
+w=100: 今日 「Qwen3.6-35B-A3B-Unc…-Q4_K_M.gguf」 2.60M
+w= 45: (今日 行完全消失)
+```
+
+修复：`shortenModelName(name, budget)` 支持宽度预算；主循环全部候选都放不下
+时，用剩余列宽反推预算再截一次，保证至少显示一个模型：
+
+```
+w= 45: 今日 「Qwen3.6-35B-A3B-U…-Q4_K_M.gguf」 2.60M
+w= 40: 今日 「Qwen3.6-35B-A3…4_K_M.gguf」 2.60M
+```
+
+空行会丢失全部信息；简短的一行至少回答了"今天用了哪个模型"。
+
+### P2：render 突发导致会话抓取重复并发
+
+render 钩子在 `session.sessionId` 未填充时每帧重新触发 `fetchSessionOnce()`；
+首帧到首次抓取 resolve 之间每帧都会再发一次，N 个并发 sqlite 查询，
+最后写入者任意获胜。修复：加 in-flight 守卫。
+
+守卫**带年龄上限**（15 s）：若某次抓取永不 settle（例如
+`getSessionUsageSummary` 返回的 promise 挂住，`Promise.allSettled` 会一直
+pending），纯布尔标志会永久锁死并静默禁用会话更新。超龄后允许新尝试顶替，
+且只有发起者本人清标志。
+
+### P2：render 每帧探测 runtime 上下文
+
+`readContextUsage()` 在 shellState 没有可用 `contextUsage` 时会每帧调用
+`rt.getContextSnapshot(sid)`，每秒分配数十个 promise 并让 mcode 每帧干活。
+改为 2 秒节流（远快于上下文预算的可见变化速度）。
+
+### P3：sidecar 写入非原子
+
+`writeFileSync(SIDECAR_PATH, ...)` 每次启动无条件重写。fork 的 `cli.js`
+按绝对路径 import 这个文件，因此并发启动 `mcodex` 时另一方可能读到写了一半
+的模块。改为：内容相同则跳过（消除 mtime churn），不同则临时文件 +
+`rename(2)` 原子替换。
+
+### P3：loader 路径未解码
+
+`_loader.mjs` 用 `new URL(import.meta.url).pathname`，路径含空格等
+percent-encoding 字符时解析错误。改用 `fileURLToPath`。
+
+### 遗留观察（未改）
+
+- `fetchSessionOnce` 里 `summary = fromRuntime || fromSqlite`：runtime 返回
+  部分非零时（`sumTotal > 0`）会优先采用，忽略更完整的 sqlite 值。当前无
+  证据表明 runtime 会返回部分值；会话令牌单调递增，若要更稳可改为取较大者。
+- `<unknown>` 桶（今天没有匹配到 turn→model 的 token）在显示时被过滤。
+  实测全历史仅占 0.01%，可忽略。
+- `sqliteDb` 只读句柄随进程存活，不显式 close（进程退出即释放）。
+
+### 验证
+
+- **P0 实测**：注入 throw，修复前 268 B 进程死亡 / 修复后 12153 B rc=0
+- **SQL 实测**：`EXPLAIN` 确认 SEARCH；稳态 84.6 ms → 0.03 ms
+- **增量正确性**：合成 DB 插入新 turn，下一轮轮询捕捉到 A+B+C 全部
+- **边界**：昨日行排除、非 assistant 角色排除、无 `id` 列 schema 回退 —— 全过
+- **真实数据比对**：增量扫描结果 vs 直查 sqlite 独立参考 —— 一致（1.2574B）
+- **窄屏**：w=200/140/100/60/50/45/40 今日行均显示
+- smoke 49 → **66/66**（+17 断言覆盖本轮修复）
+- doctor **21/0/0**
+- 0.3.10 / 0.3.11 patcher 仍 byte-identical（sha256 `1c4041b1...`）
+- mcode 本体 0 字节修改
+
+详见 DECISIONS D29。
+
 ## 2026-09-10 — v3.2.3：所有 token 显示保留 2 位小数
 
 ### 诉求

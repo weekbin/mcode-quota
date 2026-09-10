@@ -20,11 +20,13 @@
 // keep working unchanged. mcodex just calls this file instead of
 // mcode-patch-quota.mjs directly.
 
-import { readdirSync, existsSync, statSync } from "node:fs";
+import { readdirSync, existsSync } from "node:fs";
 import { join, dirname } from "node:path";
-import { pathToFileURL } from "node:url";
+import { pathToFileURL, fileURLToPath } from "node:url";
 
-const PATCHES_DIR = dirname(new URL(import.meta.url).pathname);
+// fileURLToPath (not URL.pathname) so a project path containing spaces or
+// other percent-encoded characters resolves to the real directory.
+const PATCHES_DIR = dirname(fileURLToPath(import.meta.url));
 
 const argValue = (flag) => {
   for (const a of process.argv) {

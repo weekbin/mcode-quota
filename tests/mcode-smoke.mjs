@@ -311,6 +311,61 @@ try {
   } else {
     fail++; console.log("  FAIL: could not extract fmtTok from sidecar source");
   }
+
+  // ---- render-hook crash containment (v3.2.4, P0) ----
+  // A throw inside __mcodeQuotaRender must NOT escape into Ink's reconciler.
+  // Verified empirically: without the guard an injected throw produced a
+  // 268-byte run and the TUI process died; with it the TUI ran normally.
+  // We assert the patched launcher wraps the call in try/catch.
+  console.log("\n[scenario] render hook is crash-contained");
+  {
+    const launchSrc = readFileSync(join(patched, launcher), "utf-8");
+    const hook = launchSrc.match(/__mcodeQuotaWidget=this;[\s\S]{0,400}?return r\}/);
+    check(!!hook, "render hook emitted in patched launcher");
+    if (hook) {
+      const h = hook[0];
+      check(/try\{/.test(h), "render hook wraps the sidecar call in try{");
+      check(/catch\(/.test(h), "render hook has a catch branch");
+      check(/catch\([^)]*\)\{_qr=\[\]/.test(h) || /catch\([^)]*\)\{[^}]*_qr=\[\]/.test(h),
+        "catch branch resets _qr to [] (degrades to no extra lines)");
+      check(h.includes("__mcodeQuotaLastError"), "catch records the error for diagnosis");
+      // the old shape — unguarded call — must be gone
+      check(!/\?globalThis\.__mcodeQuotaRender\(e\):\[\];if\(Array\.isArray/.test(h),
+        "unguarded call shape is gone");
+    }
+  }
+
+  // ---- today scan: incremental rowid strategy (v3.2.4) ----
+  // The time-filtered scan on local_runtime_message_rows has no index and
+  // parses ~5 KB JSON per row (measured 85 ms on a 59 K-row / 283 MB table,
+  // every 60 s, blocking the event loop). We warm once per day and then poll
+  // off the monotonic rowid. Assert the strategy is present AND that the
+  // time-filtered fallback survives for schemas without `id`.
+  console.log("\n[scenario] today scan uses the rowid range strategy with a fallback");
+  {
+    const src = sidecarSrc;
+    check(/todayScan\s*=\s*\{/.test(src), "todayScan state object present");
+    check(/id > \?/.test(src), "incremental query filters on id > ?");
+    check(/PRAGMA table_info\(local_runtime_message_rows\)/.test(src), "rowid column is probed via PRAGMA");
+    check(/created_at_ms >= \?/.test(src), "time-filtered path retained (warm / fallback)");
+    check(/SELECT MAX\(id\)/.test(src), "warm scan anchors lastId at the newest row");
+    check(/dayStartMs !== dayStartMs/.test(src) || /todayScan\.dayStartMs !== dayStartMs/.test(src),
+      "day rollover resets the incremental state");
+  }
+
+  // ---- in-flight guard (v3.2.4) ----
+  console.log("\n[scenario] session fetch is guarded against render-burst duplication");
+  {
+    const src = sidecarSrc;
+    check(/sessionFetchInFlight/.test(src), "sessionFetchInFlight flag present");
+    check(/if \(sessionFetchInFlight && startedAt - sessionFetchStartedAt < SESSION_FETCH_MAX_AGE_MS\) return;/.test(src),
+      "fetchSessionOnce early-returns while a recent fetch is in flight");
+    check(/SESSION_FETCH_MAX_AGE_MS\s*=\s*15_000/.test(src),
+      "guard is age-bounded so a stuck fetch cannot latch the flag forever");
+    check(/_fetchSessionOnceInner/.test(src), "inner body split so the flag is always cleared");
+    check(/finally \{\s*if \(sessionFetchStartedAt === startedAt\) sessionFetchInFlight = false;/.test(src),
+      "only the owning attempt clears the flag (a superseded one does not)");
+  }
 } finally {
   for (const d of tempDirs) { try { rmSync(d, { recursive: true, force: true }); } catch {} }
 }
