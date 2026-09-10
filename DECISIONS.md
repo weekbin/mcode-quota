@@ -559,47 +559,56 @@ patcher。
 - `tests/mcode-smoke.mjs` 从 live launcher 路径推断 mcode 版本，自动选对应 patches/ 目录
 - `mcodex-push-remote` 不变（patches/ 在仓库根下，自动随同步走）
 
-### D28 — mcode render 框架只接受 2 元素，today 行必须合并入 5h/周
+### D28 — mcode render 框架接受任意多元素；3 行布局可用
 
 **背景**：v3.2.0 加今日按 LLM 模型统计行时，原计划布局是 4-chunk + 5h/周 + 今日 三行。
 mcode 0.3.11 的 launcher widget 父类 `Xc.render` 返 `["", r]`（2 元素），加上我们
-的 3 行 = 5 元素返回给 framework。但 framework 实际只渲染前 2 个元素。
+的 3 行 = 5 元素返回给 framework。
 
-**反复试错**：
+**反复试错（v3.2.0 首版 ship 误判）**：
 
-1. 最初以为 framework 接受 4 元素，于是 `r.slice(1).concat(_qr)` 把 5 元素
-   压成 4 —— 仍然 today 不显示。
-2. 加 `process.stderr.write` debug 探到 framework **真的只接受 2 元素**。
-3. 试了两条路：
-   - (a) drop 4-chunk，5h/周 stacked (2 行) + 今日 (1 行) = 3 行 → 仍超 2
-   - (b) drop 4-chunk，5h/周 单行 (1 行) + 今日 (1 行) = 2 行 → 但用户要求 5h/周 带 reset times，单行放不下
-4. 最终方案：**5h/周 (单行) + 今日 (单行) 合并为同一行**。先试带 reset times 的合并
-   (`topRows[0] + SEP + todayRow`)，超 140 列；fallback 到 noReset 合并，能装下。
-   代价：5h/周 失去 reset times (`重置 Xh Ym`)。
+1. 最初 v3.2.0 ship（commit `51243ec`）以为 framework 接受 2 元素，于是合并
+   5h/周 + 今日 到一行，并删除 4-chunk。
+2. 用户反馈 "4 类数据（会话 tokens / 上下文 / 缓存命中 / 轮数）都是需要的不同维度"
+   + "今日 无论什么场景都是换行显示"。
+3. 在 200 列 pty 抓 ~30 帧验证：**framework 实际接受所有 5 元素并都画出来**。
+   Xc parent 返 `["", r]`，我们返 3 元素，PATCH_RENDER 用 `[...r, ..._qr]`
+   → 5 元素全部 paint 到独立 row。
+4. 重做：恢复 4-chunk 为独立第 1 行，5h/周 为第 2 行，今日 为第 3 行。
+   PATCH_RENDER 回 v3.0.0 风格 `[...r, ..._qr]`（不再是 `r.slice(1).concat(_qr)`）。
 
-**当前 layout**（140 列实测）：
+**当前 layout**（200 列实测 3 行各自 re-paint）：
 ```
-小时会话窗口 [██████████████░░░░░░] 69% 剩余 │ 周限制使用量 [███████████████████░] 94% 剩余 │ 今日 「MiniMax-M3」 705.8M
+会话 tokens 152.3M 「输入 1.3M │ 输出 366.2K │ 缓存 150.6M」 │ 上下文 28% 「145.0K/512.0K」 │ 缓存命中 99% │ 轮数 984
+小时会话窗口 [████████░░░░░░░░░░░░] 41% 剩余 │ 重置 3h 1m │ 周限制使用量 [██████████████████░░] 92% 剩余 │ 重置 3d 7h
+今日 「MiniMax-M3」 867.4M
 ```
 
-**用户选择**：
-- 用户原话要求"分两行" + "今日 ... 放在 [...] 下方"
-- 实际产出：1 行（5h/周 + 今日 用 SEP 连）
-- 取舍：信息可见（用户能看到今日用了什么模型），代价是位置妥协（同行而非下方）
+**v3.2.0 首版 ship 留下的 bug**（commit `51243ec`，已修复）：
+- 4-chunk 整行被删（用户投诉）
+- 5h/周 + 今日 合并到同一行（用户投诉"今日 总是换行"）
+- 这两个是同一个误判导致 —— "framework 接受 2 元素" 不成立
+
+**之前 D28 的"3 行装不下"误判**：
+
+首版 ship 时的 process.stderr.write debug 误探到 2 元素限制，根因可能是
+debug 写到了 stderr 而 stderr 被 framework 用来当控制流。重做时改用 file-based
+log（`/tmp/mcodex-debug.log` 由 `MCODE_QUOTA_DEBUG_FILE=1` 触发），pty 抓到
+5 元素全部 paint。**经验**：framework 行为的 debug 不要走 stderr / 进程内 IPC，
+走文件系统。
 
 **未做**：
 
-- ❌ 重置时间 + today 同时保留在 5h/周 行（5h 字符 + reset ≈ 25 列，加 SEP + 今日
-  ≈ 30 列，5h/周 本身已经 100+ 列，加一起超 140）
-- ❌ 强行让 framework 接受 3 元素（要改 mcode 父类 Xc.render —— 违反"mcode 本体
-  0 字节修改"约束）
-- ❌ 让用户接受 3 行（frame 1 后 today 就消失，行为更差）
+- ❌ 把 4-chunk 降级到只剩 会话 tokens（用户希望保留全部 4 类）
+- ❌ 把 5h/周 移除重置时间挤位置（用户希望保留重置时间）
+- ❌ 改 mcode 父类 Xc.render（违反"mcode 本体 0 字节修改"约束）
 
 **未来可能性**：
 
-- mcode 升级若改 framework 接受 N+3 元素，可恢复"5h/周 stacked + 今日 单独行"布局
-- 当前 layout 在窄屏（< 130 列）会 fall back 到 5h/周 stacked + 无 today —— 用户
-  在窄屏会暂时看不到今日；可接受
+- mcode 升级若 Xc parent 改成返 1 元素（不再是 `["", r]`），PATCH_RENDER
+  仍 `[...r, ..._qr]` 是兼容的，只是顶层空行消失
+- 0.3.10 同步 0.3.11 patcher（byte-identical，D27），0.3.10 的 widget 偏移
+  和 0.3.11 完全一致，所以 0.3.10 上 v3.2.0 layout 也可用
 
 ## 3. 明确不做 / 否决清单
 

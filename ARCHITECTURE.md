@@ -186,6 +186,23 @@ __mcodeQuotaRender(width) → 按宽度排版 → Ink 写 stdout
 | 2 | 47–97 | 每行带重置，标签天然对齐 |
 | 退化 | <47 | 丢方括号 / 丢百分比 / 截断标签 |
 
+**段 3**（v3.2，今日按 LLM 模型，固定 1 行）：
+
+```
+今日 「MiniMax-M3」 867.4M
+```
+
+- 数据源：`local_runtime_message_rows.data_json.context_usage_telemetry.model` ×
+  `local_runtime_token_usage.turn_id` 关联聚合
+  （0.3.11 的 `local_runtime_token_usage.model` 列始终 NULL，必须走 message rows 的 JSON）
+- 60s 轮询，跨日自动刷新
+- 响应式 top-N：`width >= 100` 最多 5 模型 / `width >= 70` 最多 3 / 否则 1
+- mmx 失败时仍能出（与 quota 数据源解耦）
+
+**段顺序（v3.2 重做后）**：1 (会话上下文) → 2 (token usage) → 3 (今日按模型)，
+三段各自独立行，不合并。Xc parent 返 `["", r]` 2 元素 + 我们返 3 元素 =
+5 元素返回给 framework，全部 paint 到独立 row（D28）。
+
 **开关**：`MCODE_QUOTA_TAIL` = `auto`（默认，≥80 列才给明细）/ `full`（永远保留明细）/
 `compact`（永远不显示明细）。
 

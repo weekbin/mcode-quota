@@ -475,46 +475,107 @@ globalThis.__mcodeQuotaRender = function (width) {
 
     // v2.5: token-usage bars (小时会话窗口 / 周限制使用量) live on top
     // (closest to the mcode status bar). On wide screens they share one
-    // row; on narrow screens they stack on two rows with reset times.
-    if (topRows.length > 0) {
-      // v3.2: try to merge the today row as a suffix onto the combined
-      // 5h/周 row. If the merged line fits, that's our single line for
-      // this frame; otherwise just the 5h/周 rows go through.
-      const todayRow = renderTodayByModelRow(width)[0] || null;
-      if (topRows.length === 1 && todayRow) {
-        // Try merge with full 5h/周 (with reset times)
-        const merged = topRows[0] + SEP + todayRow;
-        if (dw(merged) <= width) {
-          lines.push(merged);
-        } else {
-          // Fallback: drop the reset times from 5h/周 to make room for
-          // today. The bare bar is shorter and usually fits.
-          const noReset = fit((bar) => q5n(bar) + SEP + qwn(bar), width);
-          const mergedNoReset = noReset + SEP + todayRow;
-          if (dw(mergedNoReset) <= width) {
-            lines.push(mergedNoReset);
-          } else {
-            // Truly too narrow: just show 5h/周 with reset times; today
-            // silently degrades (re-appears on a wider screen).
-            lines.push(...topRows);
-          }
-        }
-      } else {
-        lines.push(...topRows);
+    // v2.5 section order: 4-chunk row (会话 tokens + 上下文 + 缓存命中
+    // + 轮数) on top, then 5h/周 bars. v3.2 added 今日 (per-LLM-model
+    // totals) on a third row below 5h/周.
+    //
+    // The mcode framework can render any number of our elements (verified
+    // with 3 of our lines on a 140-col pty), so we keep all three rows
+    // as separate visual lines.
+
+    // v3.2: 4-chunk row (会话 tokens [breakdown] │ 上下文 │ 缓存命中 │ 轮数)
+    //   Restored from v3.1.0. MCODE_QUOTA_TAIL controls breakdown visibility.
+    const join = (...chunks) => chunks.filter(Boolean).join(SEP);
+    const placeholder = (label) => muted(label + " …");
+    const sessionFull = renderSessionChunk(false) || (pendingPlaceholders.session ? placeholder("会话 tokens") : null);
+    const sessionCompact = renderSessionChunk(true) || sessionFull;
+    const ctx = renderContextChunk() || (pendingPlaceholders.context ? placeholder("上下文") : null);
+    const hit = renderCacheHitChunk() || (pendingPlaceholders.session ? placeholder("缓存命中") : null);
+    const turn = renderTurnCountChunk() || (pendingPlaceholders.session ? placeholder("轮数") : null);
+
+    const buildCandidates = (allowDetail) => {
+      const list = [];
+      if (allowDetail && sessionFull && ctx) {
+        list.push(join(sessionFull, ctx, hit, turn));
+        list.push(join(sessionFull, ctx, hit));
+        list.push(join(sessionFull, ctx, turn));
+        list.push(join(sessionFull, ctx));
       }
+      if (sessionCompact && ctx) {
+        list.push(join(sessionCompact, ctx, hit, turn));
+        list.push(join(sessionCompact, ctx, hit));
+        list.push(join(sessionCompact, ctx, turn));
+        list.push(join(sessionCompact, ctx));
+      }
+      if (allowDetail && sessionFull) list.push(sessionFull);
+      if (sessionCompact) list.push(sessionCompact);
+      if (ctx) list.push(ctx);
+      return list;
+    };
+
+    const topRowCandidates = (() => {
+      if (TAIL_MODE === "compact") return buildCandidates(false);
+      if (TAIL_MODE === "full") return buildCandidates(true);
+      const detailList = buildCandidates(true);
+      const compactList = buildCandidates(false);
+      const detailFits = detailList.some((c) => dw(c) <= width);
+      return detailFits ? detailList : compactList;
+    })();
+
+    if (topRowCandidates.some((c) => dw(c) <= width)) {
+      const fits = topRowCandidates.filter((c) => dw(c) <= width);
+      fits.sort((a, b) => dw(b) - dw(a));
+      lines.push(fits[0]);
+    } else {
+      const coreLine = sessionFull || sessionCompact || ctx || "";
+      lines.push(coreLine);
+      const tailPieces = [ctx, hit, turn].filter(Boolean);
+      let buf = "";
+      for (const p of tailPieces) {
+        const candidate = buf ? buf + SEP + p : p;
+        if (dw(candidate) <= width) {
+          buf = candidate;
+        } else {
+          if (buf) lines.push(buf);
+          buf = p;
+        }
+      }
+      if (buf && !lines.includes(buf)) lines.push(buf);
+    }
+
+    // 5h/周 bars (separate line, with reset times when wide)
+    lines.push(...topRows);
+
+    // 今日 (per-LLM-model) — separate line below 5h/周
+    const todayRows = renderTodayByModelRow(width);
+    if (todayRows.length > 0) {
+      lines.push(...todayRows);
     } else if (placeholderToday()) {
-      // No quota data but we have a today placeholder: still useful.
       lines.push(placeholderToday());
     }
   } else {
-    // No quota data yet: just the today row (sourced from sqlite, does
-    // not depend on mmx). The 4-chunk placeholders would also try to
-    // render here, but they would take the second of our 2 lines and
-    // push the today row out. So we skip them when raw is invalid and
-    // show only the today row.
+    // No quota data yet: 4-chunk placeholders + 今日 placeholder.
+    // We still try to render 4-chunk so the user sees structure while
+    // waiting for mmx to return; the placeholders show "..." for the
+    // chunks that haven't filled.
+    const join = (...chunks) => chunks.filter(Boolean).join(SEP);
+    const placeholder = (label) => muted(label + " …");
+    const sessionFull = renderSessionChunk(false) || (pendingPlaceholders.session ? placeholder("会话 tokens") : null);
+    const sessionCompact = renderSessionChunk(true) || sessionFull;
+    const ctx = renderContextChunk() || (pendingPlaceholders.context ? placeholder("上下文") : null);
+    const hit = renderCacheHitChunk() || (pendingPlaceholders.session ? placeholder("缓存命中") : null);
+    const turn = renderTurnCountChunk() || (pendingPlaceholders.session ? placeholder("轮数") : null);
+    const tryList = [];
+    if (sessionFull && ctx) tryList.push(join(sessionFull, ctx, hit, turn));
+    if (sessionCompact && ctx) tryList.push(join(sessionCompact, ctx, hit, turn));
+    if (sessionFull) tryList.push(sessionFull);
+    if (sessionCompact) tryList.push(sessionCompact);
+    if (ctx) tryList.push(ctx);
+    for (const c of tryList) if (dw(c) <= width) { lines.push(c); break; }
+
     const todayRows = renderTodayByModelRow(width);
     if (todayRows.length > 0) {
-      lines.push(todayRows[0]);
+      lines.push(...todayRows);
     } else if (placeholderToday()) {
       lines.push(placeholderToday());
     }
@@ -1121,7 +1182,7 @@ const buildPatchRender = (runtimeProp, shellStateProp) => {
     `globalThis.__mcodeQuotaWidget=this;` +
     `let _qr=typeof globalThis.__mcodeQuotaRender==="function"` +
     `?globalThis.__mcodeQuotaRender(e):[];` +
-    `if(Array.isArray(r)&&Array.isArray(_qr)&&_qr.length>0){return r.slice(1).concat(_qr)}return r}`;
+    `if(Array.isArray(r)&&Array.isArray(_qr)&&_qr.length>0){return[...r,..._qr]}return r}`;
   return body;
 };
 

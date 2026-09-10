@@ -189,12 +189,27 @@ if [[ -f "$SIDECAR" ]]; then
   else
     warn "separator is not │"
   fi
-  # Section contract (v3.2): the quota block has ONE line (5h/周 + 今日).
-  # 4-chunk was removed to make room for the today row — see DECISIONS D28.
+  # Section contract (v3.2): three independent lines.
+  #   1) 4-chunk: 会话 tokens + 上下文 + 缓存命中 + 轮数
+  #   2) 5h/周: 小时会话窗口 + 周限制使用量
+  #   3) 今日: 今日 「model」 X.XM
+  # 4-chunk was removed in v3.2.0 first ship then restored after user feedback;
+  # today row is its own line (no longer merged into 5h/周). See DECISIONS D28.
   if printf '%s' "$WIDE" | grep -q "小时会话窗口" && printf '%s' "$WIDE" | grep -q "周限制使用量"; then
     ok "section contract: 5h/周 bars present (小时会话窗口 + 周限制使用量)"
   else
     warn "section contract violated: 5h/周 bars should be present"
+  fi
+  if printf '%s' "$WIDE" | grep -qE "会话 tokens"; then
+    ok "section contract: 4-chunk present (会话 tokens)"
+  else
+    warn "section contract violated: 4-chunk (会话 tokens) should be present"
+  fi
+  WIDE_LINES=$(printf '%s\n' "$WIDE" | grep -cE "会话 tokens|小时会话窗口|今日 ")
+  if [[ "$WIDE_LINES" -ge 3 ]]; then
+    ok "section contract: 3 lines painted (4-chunk + 5h/周 + 今日), got $WIDE_LINES"
+  else
+    warn "section contract violated: expected ≥3 lines, got $WIDE_LINES"
   fi
 fi
 
