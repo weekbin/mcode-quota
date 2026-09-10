@@ -4,6 +4,10 @@ End-to-end setup for the mcodex quota status line, covering all supported
 install layouts and platforms. mcodex never modifies mcode itself: every
 patch goes into a private fork under `~/.local/share/mcode-quota/`.
 
+> **If you are an AI agent** asked to install mcodex on a new machine,
+> read [AGENTS.md](AGENTS.md) instead — it has the same content plus
+> decision trees and a "what not to do" list.
+
 ## TL;DR
 
 ```bash
@@ -15,16 +19,29 @@ npm install -g @minimax-ai/code         # npm-global layout
 # 2. Install mcodex (one-shot, idempotent)
 git clone https://github.com/weekbin/mcode-quota.git ~/Works/mcode-quota
 cd ~/Works/mcode-quota
-./mcodex-install
+./mcodex-install                        # or --check for diagnostic-only
 
 # 3. Use
 mcodex                                  # starts mcode with quota status line
-mcodex-install/scripts/../mcode-quota-doctor  # self-check (21 items)
+./mcode-quota-doctor                    # self-check (21 items)
 ```
 
 `mcodex-install` auto-detects your mcode layout, builds the shim if
 needed, installs the `mmx-cli` for the 5h/周 quota data source, and
 runs `mcodex --version` once to materialize the fork.
+
+`mcodex-install` flags:
+
+| Flag | Effect |
+|---|---|
+| `--check` | pre-flight diagnostic; no changes made |
+| `--mmx-skip` | do not attempt to install mmx even if missing |
+| `--mmx-fail` | exit non-zero if mmx install fails (default: warn) |
+| `--no-fork` | skip the `mcodex --version` first-run step |
+| `--copy` | install PATH entry as a copy instead of a symlink |
+| `--bin-dir=DIR` | PATH entry directory (default `~/.minimax/bin`) |
+| `--project=DIR` | override the project directory |
+| `--quiet` | suppress non-essential output |
 
 ---
 
@@ -45,7 +62,7 @@ runs `mcodex --version` once to materialize the fork.
 
 | Dep | Why | If missing |
 |---|---|---|
-| `mmx` (`mmx-cli`) | source for 5h/周 quota; comes from `https://github.com/MiniMax-AI/cli` | mcodex-install auto-installs via `npm install -g mmx-cli`; mcodex degrades gracefully (5h/周 stays empty, other 5 data sources still work) |
+| `mmx` (`mmx-cli`) | source for 5h/周 quota; comes from `https://github.com/MiniMax-AI/cli` | mcodex-install auto-installs with a 3-step fallback chain: (1) `npm install -g mmx-cli`, (2) `npm install -g mmx-cli --registry https://registry.npmmirror.com` (CN mirror), (3) download tarball from `https://registry.npmjs.org/mmx-cli/-/mmx-cli-<v>.tgz` and `npm install -g .`. If all three fail, mcodex degrades gracefully (5h/周 stays empty, other 5 data sources still work). |
 | Active `mmx auth login` | mmx must be logged in for quota data | `mmx auth login` (OAuth) or `mmx auth login --api-key <key>` |
 
 ### Out-of-scope but related
@@ -141,11 +158,17 @@ git clone https://github.com/weekbin/mcode-quota.git ~/Works/mcode-quota
 cd ~/Works/mcode-quota
 ./mcodex-install
 
-# Expected output:
-#   [mcodex-install] ✓ found mcode at npm-global: ...
+# Expected output (≈15 lines):
+#   [mcodex-install] running mcodex-install on macos 26.6.1 (arm64)
+#   [mcodex-install] pre-flight:
+#   [mcodex-install]   OS:        macos 26.6.1 (arm64, family=darwin)
+#   [mcodex-install]   pkg mgr:   brew
+#   [mcodex-install]   node:      v22.23.2
+#   [mcodex-install]   npm:       10.9.8
+#   [mcodex-install]   mcode:     0.3.11
+#   [mcodex-install] ✓ pre-flight passed
 #   [mcodex-install] ✓ mcode version: 0.3.11 (npm-global layout)
-#   [mcodex-install] ✓ project: ...
-#   [mcodex-install] ✓ acorn installed
+#   [mcodex-install] ✓ acorn present
 #   [mcodex-install] ✓ shim ready (symlink + .mcode-launcher + current pointer)
 #   [mcodex-install] ✓ mmx installed: /Users/.../bin/mmx
 #   [mcodex-install] ✓ PATH entry installed (symlink)

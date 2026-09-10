@@ -1,6 +1,6 @@
 {
   "name": "mcode-quota",
-  "version": "3.2.0",
+  "version": "3.2.6",
   "description": "mcodex — fork-isolated quota + session token status bar for mcode",
   "type": "module",
   "bin": {
@@ -24,6 +24,7 @@
     "tests/",
     "package.json",
     "README.md",
+    "AGENTS.md",
     "ARCHITECTURE.md",
     "MAINTENANCE.md",
     "INSTALL.md",

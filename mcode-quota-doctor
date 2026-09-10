@@ -39,7 +39,17 @@ fi
 # BSD find (macOS). BSD find rejects `-printf` and doctor would silently report
 # zero versioned patches.
 if [[ -d "$PATCHES_DIR" ]]; then
-  AVAILABLE_PATCHES="$(ls -1 "$PATCHES_DIR" 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tr '\n' ' ')"
+  # Sort versions numerically — sort -V is GNU-only and macOS BSD sort only
+  # supports it from macOS 15 (Sequoia) onward. The awk-based version sort
+  # works everywhere.
+  AVAILABLE_PATCHES="$(
+    ls -1 "$PATCHES_DIR" 2>/dev/null \
+      | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' \
+      | awk -F. '{ printf "%09d %09d %09d %s\n", $1+0, $2+0, $3+0, $0 }' \
+      | sort \
+      | awk '{ print $4 }' \
+      | tr '\n' ' '
+  )"
   if [[ -n "$AVAILABLE_PATCHES" ]]; then
     ok "versioned patches available: $AVAILABLE_PATCHES"
     # Resolve which one the loader would pick for the current mcode version.
