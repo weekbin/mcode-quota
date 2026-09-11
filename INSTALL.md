@@ -1,8 +1,16 @@
 # mcodex — Install Guide
 
 End-to-end setup for the mcodex quota status line, covering all supported
-install layouts and platforms. mcodex never modifies mcode itself: every
-patch goes into a private fork under `~/.local/share/mcode-quota/`.
+install layouts and platforms. **mcode is never modified.** How the status
+line is attached depends on the installed mcode version, and `mcodex`
+picks automatically:
+
+| mcode | strategy | what gets written |
+|---|---|---|
+| **≥ 0.4.0** | native `custom-command` | two keys in `~/.minimax/config.yaml` — nothing else |
+| **< 0.4.0** | legacy fork patch | a private fork under `~/.local/share/mcode-quota/` |
+
+`./mcodex status` tells you which one is in force.
 
 > **If you are an AI agent** asked to install mcodex on a new machine,
 > read [AGENTS.md](AGENTS.md) instead — it has the same content plus
@@ -21,14 +29,22 @@ git clone https://github.com/weekbin/mcode-quota.git ~/Works/mcode-quota
 cd ~/Works/mcode-quota
 ./mcodex-install                        # or --check for diagnostic-only
 
-# 3. Use
-mcodex                                  # starts mcode with quota status line
-./mcode-quota-doctor                    # self-check (21 items)
+# 3. Verify, then use
+./mcodex status                         # which strategy + config state
+./mcode-quota-doctor                    # self-check
+mcodex                                  # start mcode (or just run `mcode`)
 ```
 
 `mcodex-install` auto-detects your mcode layout, builds the shim if
-needed, installs the `mmx-cli` for the 5h/周 quota data source, and
-runs `mcodex --version` once to materialize the fork.
+needed, installs `mmx-cli` for the 5h/周 data source, then runs one
+bootstrap pass:
+
+- **mcode ≥ 0.4.0** — writes the `custom-command` config. After this,
+  plain `mcode` shows the rows too; `mcodex` is only needed for
+  install / status / doctor.
+- **mcode < 0.4.0** — materializes the private fork.
+
+`--no-fork` skips that bootstrap step on either path.
 
 `mcodex-install` flags:
 
@@ -172,7 +188,8 @@ cd ~/Works/mcode-quota
 #   [mcodex-install] ✓ shim ready (symlink + .mcode-launcher + current pointer)
 #   [mcodex-install] ✓ mmx installed: /Users/.../bin/mmx
 #   [mcodex-install] ✓ PATH entry installed (symlink)
-#   [mcodex-install] ✓ fork built and mcodex responsive
+#   [mcodex-install] ✓ setup done (run 'mcodex status' for which strategy applies)
+#   [mcodex-install] ✓ strategy: native custom-command (no fork, no patching)
 #   [mcodex-install] ✓ mcodex install complete.
 
 # 3. Login to mmx for quota data (one-time, interactive)
@@ -182,9 +199,13 @@ mmx auth login --api-key <key>        # direct
 # 4. Use
 mcodex                                # TUI with quota status line
 
-# 5. Self-check
+# 5. Which strategy, then self-check
+./mcodex status
+#   strategy : native custom-command (no fork, no patching)   [>= 0.4.0]
+#   strategy : legacy fork patch (< 0.4.0)                    [older]
 ./mcode-quota-doctor
-# Expected: Result: 21 ok, 0 warnings, 0 failures
+# Expected: Result: 18 ok, 0 warnings, 0 failures
+# (the legacy strategy runs 2 extra fork checks)
 ```
 
 ---
@@ -192,15 +213,26 @@ mcodex                                # TUI with quota status line
 ## Upgrading mcode
 
 ```bash
-npm install -g @minimax-ai/code@<new-version>      # 1. upgrade mcode
-echo -n "<new-version>" > ~/.minimax-code/current  # 2. update pointer
-mcodex                                              # 3. mcodex detects new version,
-                                                    #    downloads new tarball, rebuilds fork
-./mcode-quota-doctor                                # 4. verify
+mcode update          # 1. upgrade mcode (or the platform installer)
+mcodex install        # 2. >= 0.4.0: refresh the config (idempotent)
+                      #    <  0.4.0: nothing to install; the fork is
+                      #    rebuilt on the next launch
+mcodex doctor         # 3. verify — expect 0 failures
+mcodex                # 4. (or just `mcode`) confirm the 3 rows render
 ```
 
-If the new mcode version changed the widget structure, you also need a
-new `patches/<new>/` directory in this repo. See MAINTENANCE.md §5.5.
+**On mcode ≥ 0.4.0 the native `custom-command` item carries the status
+line, so a version bump almost never requires a code change** — we depend
+on a config schema, not on mcode's internals. Only if mcode moves the
+`customStatusLine` schema or renames the sqlite columns do we edit
+`lib/`. After any edit, `tests/parity.mjs` and `tests/mcode-smoke.mjs`
+must stay green.
+
+**On mcode < 0.4.0** the fork patch re-derives its anchors on each launch,
+so small bumps usually just work. If the widget structure really changed,
+add a new `patches/<new>/` directory. The full decision tree — including
+the one-time fork→native switch when crossing 0.4.0 — is in
+[MAINTENANCE.md](MAINTENANCE.md) §3.
 
 ---
 

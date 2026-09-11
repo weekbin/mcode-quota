@@ -6,12 +6,28 @@
 
 ## What mcodex is
 
-A fork-isolated patcher for the mcode TUI: it adds a 3-line quota status
-bar (会话 tokens / 上下文 / 5h/周 配额 / 今日按 LLM 模型) without ever
-modifying mcode itself. All patches go into a private fork at
-`~/.local/share/mcode-quota/mcode-clone/<v>/code/`. The doctor's core
-invariant: **mcode's launcher is byte-identical to the npm pristine
-tarball after install.**
+Adds a 3-line quota / token status block under mcode's status bar
+(会话 tokens + 上下文 / 5h-周 limits / 今日 per-LLM-model totals) **without
+ever modifying mcode itself.**
+
+There are two strategies, picked automatically from the installed mcode
+version — do not assume the fork one:
+
+| mcode | strategy | how it works |
+|---|---|---|
+| **≥ 0.4.0** | **native (default now)** | mcodex merges `tui.statusLine` + `tui.customStatusLine` into `~/.minimax/config.yaml`; mcode's own `custom-command` status item then runs `<repo>/mcodex-status` (stdin JSON in, up to 5 stdout lines out). No fork, no patching, nothing to rebuild. |
+| **< 0.4.0** | legacy fork | `patches/_loader.mjs` picks `patches/<version>/` and patches a private pristine fork at `~/.local/share/mcode-quota/mcode-clone/<v>/code/`. |
+
+Both paths share one renderer (`lib/render.mjs`); `tests/parity.mjs` asserts
+their output is byte-identical. The doctor's core invariant for **both**:
+**mcode's own installation is unmodified** — on the native path it is not
+even opened for writing.
+
+Check which one applies before doing anything:
+
+```bash
+./mcodex status
+```
 
 ## Quick path (one command, idempotent)
 
@@ -77,10 +93,22 @@ mcodex-install failed
   │       a) update mcodex (`git pull` in the project) and re-run
   │       b) use a copy instead: `./mcodex-install --copy`
   │
+  ├─ native path (>= 0.4.0) shows no status block at all
+  │    ├─ `mcodex status` says "config applied: no"
+  │    │    └─ `mcodex install` (idempotent; rewrites only its own keys)
+  │    ├─ `mcodex status` says yes, but still nothing
+  │    │    └─ `mcodex doctor`; check the statusLine / command items.
+  │    │       Then feed the script a payload by hand:
+  │    │       printf '{"protocol":1,"event":"interval","session_id":"<mvs_…>",
+  │    │         "workspace_dir":"/tmp","model":"-","tui_version":"0.4.0"}\n'
+  │    │         | COLUMNS=200 ./mcodex-status
+  │    │       Output => mcode side. No output => MCODEX_STATUS_DEBUG=1 for why.
+  │    └─ config was rewritten by mcode → just `mcodex install` again
+  │
   └─ doctor shows "mcode launcher differs from pristine npm tarball"
-       └─ mcode itself was modified. The install script never touches
-          mcode — either the user did, or an old mcodex version did.
-          Restore mcode: see MAINTENANCE.md §6.
+       └─ mcode itself was modified. Neither strategy writes to mcode —
+          the native one does not even open it. Either the user did, or
+          an old mcodex version did. Restore: MAINTENANCE.md §6.
 ```
 
 ## How the install script decides what to do
@@ -114,10 +142,16 @@ mcodex-install failed
      instead.
 7. **Install PATH entry** — symlink `~/.minimax/bin/mcodex` to the
    project's `mcodex` wrapper. Use `--copy` for a copy instead. The
-   wrapper follows symlinks (commit F1), so a symlink is safe.
-8. **First run** — `mcodex --version` to materialize the fork under
-   `~/.local/share/mcode-quota/mcode-clone/<v>/code/`. Idempotent —
-   re-running just re-checks byte equality.
+   wrapper resolves symlinks before deriving its project root
+   (BASH_SOURCE[0] alone would yield the symlink's directory), so a
+   symlink is safe.
+8. **First run** — `mcodex --version`. What that does depends on the
+   detected version:
+   - **≥ 0.4.0 (native)**: writes the two `custom-command` keys into
+     `~/.minimax/config.yaml` and execs stock mcode. No fork is created.
+   - **< 0.4.0 (legacy)**: materializes the fork under
+     `~/.local/share/mcode-quota/mcode-clone/<v>/code/`.
+   Either way it is idempotent — re-running only re-checks equality.
 
 ## Cross-OS compatibility
 
@@ -163,31 +197,68 @@ only re-creates the read-only shim if missing.
 - Do **not** commit anything to the mcode-quota repo without an
   explicit task. The repo is a personal mirror at
   `github.com/weekbin/mcode-quota`.
+- Do **not** hand-edit `~/.minimax/config.yaml` to add or remove the
+  `custom-command` / `customStatusLine` keys — run `mcodex install` /
+  `mcodex uninstall`. They edit only those keys, keep every comment and
+  the surrounding layout, and round-trip byte-identically; a manual edit
+  easily corrupts a file the user has tuned.
+- Do **not** force-push the mirror. If the remote has moved ahead (for
+  example another machine pushed), `mcodex-push-remote` fetches and
+  merges with `-s ours`, preserving the other side's commits.
 
 ## Verifying success
 
-After install, `./mcode-quota-doctor` should print:
+Run `./mcodex status` first — it names the strategy in force:
 
 ```
-Result: 21 ok, 0 warnings, 0 failures
+mcodex status
+  mcode version   : 0.4.0
+  strategy        : native custom-command (no fork, no patching)
+  config applied  : yes
 ```
 
-Key items to look at:
+Then `./mcode-quota-doctor`. It runs the check set for the detected
+strategy and should end with:
 
-- `mcode launcher pristine (no quota hooks)` — mcode is not modified
-- `mcode launcher byte-identical to pristine npm tarball` — mcode is
-  byte-identical to the official npm package
-- `fork launcher render hook present` — patcher ran successfully
-- `live render: ...` — sidecar can produce the quota line
-- `mmx on PATH` and `mmx appears logged in` — 5h/周 quota will be
-  visible
+```
+Result: 18 ok, 0 warnings, 0 failures
+```
+
+**Native path (≥ 0.4.0)** — items to look at:
+
+- `mcode launcher pristine (no quota hooks)` — mcode unmodified
+- `config present: ~/.minimax/config.yaml` — mcodex's config is there
+- `statusLine includes custom-command` — our item is wired in
+- `customStatusLine.command executable: …/mcodex-status`
+- `maxLines = 3` / `colorMode = ansi`
+- `live render: 会话 tokens …` — the script answers a synthetic payload
+- `parity with legacy fork renderer: 19 pass, 0 fail`
+- `mmx on PATH` / `mmx appears logged in` — 5h/周 quota will be visible
+
+Startup is triggered by mcode: if the block is briefly empty right after
+launch that is the 10 s tick, not a failure.
+
+**Legacy path (< 0.4.0)** — additionally:
+
+- `fork launcher render hook present` — the patcher ran
+- `fork cli.js imports sidecar statically`
+- `mcode launcher byte-identical to pristine npm tarball`
+
+## Upgrading mcode later (what an agent should do)
+
+`mcode update && mcodex install && mcodex doctor`. On the native path
+that is almost always the whole job — the full playbook, including when
+code changes *are* needed, is MAINTENANCE.md §3. Read it before editing
+anything. After any code change, `tests/parity.mjs` and
+`tests/mcode-smoke.mjs` must both be green.
 
 ## References
 
 - `README.md` — what the patch does, output examples, data sources
 - `INSTALL.md` — human-facing install guide with all the detail
-- `MAINTENANCE.md` — troubleshooting, anchor re-derivation, how to
-  add a new mcode version
+- `MAINTENANCE.md` — **§3 is the upgrade playbook**: what to do when
+  mcode gets a new version, on either strategy; plus troubleshooting and
+  anchor re-derivation
 - `ARCHITECTURE.md` — design and isolation model
 - `DECISIONS.md` — why each design choice was made
 - `CHANGELOG.md` — every change to the toolset

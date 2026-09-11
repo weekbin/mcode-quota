@@ -64,72 +64,180 @@ mcodex doctor      # 自检
 
 ## 2. 架构速览
 
+两条策略，按 mcode 版本自动选（详见 [ARCHITECTURE.md](ARCHITECTURE.md)）。
+
+**≥ 0.4.0 —— 原生，不改 mcode**
+
 ```
-mcode 官方安装（只读）        私有 fork（可随时删）
-~/.minimax-code/releases/<v>/  ~/.local/share/mcode-quota/mcode-clone/<v>/code/
-   lib/.../chunks/launcher.js     cli.js            ← 静态 import sidecar
-        │                         chunks/launcher.js ← render() 覆盖
-        │                              │
-        └──── 从不写入 ────────────────┘
-                                       │
+mcode 官方安装（只读，0 字节修改）
+~/.minimax-code/releases/<v>/lib/node_modules/@minimax-ai/code/
+        │
+        │  只读
+        ▼
+~/.minimax/config.yaml          ← mcodex 合并两个键（文本级，保留注释）
+  tui.statusLine += custom-command
+  tui.customStatusLine.command = <repo>/mcodex-status
+        │
+        │  mcode 在 startup / session 切换 / 每 10s 调用
+        ▼
+  <repo>/mcodex-status   ← stdin JSON(session_id/model/…) → 3 行到 stdout
+        │
+        ├─ lib/data.mjs    读 sqlite + mmx（各带 60s 文件缓存）
+        └─ lib/render.mjs  纯渲染
+```
+
+**< 0.4.0 —— 私有 fork 补丁**
+
+```
+mcode 官方安装（只读）          私有 fork（可随时删）
+~/.minimax-code/releases/<v>/   ~/.local/share/mcode-quota/mcode-clone/<v>/code/
+   lib/.../chunks/launcher.js      cli.js            ← 静态 import sidecar
+        │                          chunks/launcher.js ← render() 覆盖
+        └──── 从不写入 ────────────┘
+                                    │
                     sidecar（项目目录）← 懒启动：第一次渲染才 fork mmx
 ```
 
-- patcher：`mcode-patch-quota.mjs`（Node，幂等）
-- 锚点发现：`mcode-find-anchors.mjs`（acorn AST）
-- 入口：`~/.minimax/bin/mcodex` → 项目目录 `mcodex`
-- 自检：`mcode-quota-doctor`
+- 入口：`~/.minimax/bin/mcodex`（**软链接**到项目目录的 `mcodex`，脚本会跟随软链解路径）
+- 自检：`mcode-quota-doctor`（按版本自动选对应的一组检查）
+- 渲染核心：两条路径共用 `lib/render.mjs`，由 `tests/parity.mjs` 逐字节锁定一致
 
 ---
 
-## 3. 常规升级流程
+## 3. mcode 版本升级时我们的动作
 
-### 3.1 升级
+**一句话**：`mcode update && mcodex install && mcodex doctor`。绝大多数情况
+到此为止 —— 如果升级没跨过 0.4.0 这条线，连 `install` 都不需要。
+
+下面按「升级前 / 升级后 / 需要写代码时」三段说清楚。
+
+### 3.1 升级前：先看版本落在哪一侧
+
+```bash
+cat ~/.minimax-code/current        # 当前版本
+mcodex status                      # 当前用的哪条策略
+```
+
+| 当前版本 | 策略 | 升级到 | 要做什么 |
+|---|---|---|---|
+| ≥ 0.4.0 | 原生 | 更高的 0.4.x / 0.5.x | 大概率**什么都不用做**（见 3.2） |
+| ≥ 0.4.0 | 原生 | **降级**到 < 0.4.0 | 会切到 fork 路径，见 3.4 |
+| < 0.4.0 | fork | < 0.4.0（如 0.3.11→0.3.12） | 可能要补 `patches/<新版本>/`，见 3.4 |
+| < 0.4.0 | fork | **≥ 0.4.0** | **一次切换**，见 3.3 |
+
+### 3.2 原生路径下的常规升级（≥ 0.4.0 → 更高）
+
+```bash
+mcode update          # 升级 mcode 本体
+mcodex install        # 幂等刷新 config.yaml（会自愈被覆盖的配置）
+mcodex doctor         # 期望 18 ok, 0 warnings, 0 failures
+```
+
+**为什么多半不用改代码**：我们只依赖 mcode 的**配置 schema**
+（`tui.statusLine` / `tui.customStatusLine`）和两处磁盘数据
+（`local_runtime_token_usage`、`local_runtime_message_rows.data_json` 的
+`context_usage`）。这些是外部契约，比压缩后的内部方法名稳定得多。
+
+**真出问题时按顺序查**：
+
+1. **状态栏完全没有我们的 3 行**
+   ```bash
+   mcodex status                 # config applied 是 yes 吗
+   mcodex install                # 不是就装上
+   ```
+   还是不行 → `mcodex doctor`，看 `statusLine includes custom-command` 与
+   `customStatusLine.command executable` 两项。
+
+2. **有 3 行但内容不对 / 缺行**
+   ```bash
+   # 手动喂一次 payload，看脚本自己输出什么
+   printf '{"protocol":1,"event":"interval","session_id":"<某个 mvs_…>","workspace_dir":"/tmp","model":"-","tui_version":"0.4.0"}\n' \
+     | COLUMNS=200 ./mcodex-status
+   ```
+   有输出 → 问题在 mcode 侧（配置没生效）；没输出 → 加
+   `MCODEX_STATUS_DEBUG=1` 看 stderr。
+
+3. **配置被 mcode 重写了**（例如它自己的 setup 流程重建了 config.yaml）
+   - `mcodex install` 会重新合并。我们只动自己那两个键，文本级编辑。
+
+4. **`maxLines` / `position` 语义变了**
+   - 查 mcode 版本自带的 `CHANGELOG.md`，搜 `customStatusLine`。
+   - 必要时改 `lib/config-apply.mjs` 里写入的默认值。
+
+5. **sqlite 表结构变了**（列名、`id` 列消失、`context_usage` 改名）
+   - `lib/data.mjs` 的每个取数函数都独立 try/catch，单行降级而不是整行消失。
+   - 定位：`sqlite3 ~/.minimax/v2/sqlite/runtime-state.sqlite ".schema local_runtime_token_usage"`
+     和 `.schema local_runtime_message_rows`。
+   - 改完**必须**跑 `node tests/parity.mjs` 与 `node tests/mcode-smoke.mjs`。
+
+### 3.3 从 fork 切到原生（跨过 0.4.0 那次）
+
+只在**第一次**跨过 0.4.0 时需要，之后就都是 3.2 了。
+
+```bash
+mcode update            # 升到 ≥ 0.4.0
+mcodex status           # 应显示 strategy: native custom-command
+mcodex install          # 写入 config.yaml
+mcodex doctor           # 18/0/0
+./mcodex                # 或直接跑 mcode，确认 3 行都在
+```
+
+切换后可以清掉 fork 释放空间（确认新路径正常之后再做）：
+
+```bash
+# 只删 fork 与 pristine 缓存，不动 mcode 本体
+du -sh ~/.local/share/mcode-quota/mcode-clone
+# 逐版本删，例如：
+#   0.4.0 及以后的 fork 不再需要
+```
+
+**注意**：`patches/0.4.0/` 已在 v3.3.0 删除（0.4.0 不再需要补丁）。如果将来
+mcode 又出现「必须打补丁」的场景（例如 `custom-command` 被移除），再补目录。
+
+### 3.4 legacy 路径下的升级（< 0.4.0 → < 0.4.0）
+
+fork 路径靠 **AST 推导锚点**（不锁类名/字段名），所以小版本升级通常自动通过：
 
 ```bash
 mcode update
+mcodex                 # 会自动重建 fork 并重打补丁
+mcodex doctor          # 看 fork launcher render hook present 等项
 ```
 
-### 3.2 启动
+**只有当 widget 结构真的变了**，才需要新增 `patches/<新版本>/`：
 
 ```bash
-mcodex
+cp -r patches/0.3.11 patches/0.3.12      # 以最近的为起点
+cd patches/0.3.12
+MCODE_FIND_ANCHORS_DEBUG=1 node mcode-find-anchors.mjs \
+  ~/.minimax-code/releases/0.3.12/lib/node_modules/@minimax-ai/code/chunks/launcher-*.js
 ```
 
-`mcodex` 内部流程：
+- 输出里的 `WIDGET` / `RUNTIME_PROP` / `SHELLSTATE_PROP` / 锚点偏移用来核对；
+- `patches/_loader.mjs` 按 `--current` 选目录：**精确匹配 → 最高 `<=` → 报错**。
+  所以即使不加新目录，老 patcher 也会被拿来试（可能通过，也可能失败）；
+- 两个版本目录的 `mcode-patch-quota.mjs` 目前是 **byte-identical**（D27），
+  分叉了就各自维护并在 `NOTES.md` 记录 sha256。
 
-1. 读 `~/.minimax-code/current`
-2. 跑 `mcode-patch-quota.mjs --src=... --fork-base=... --sidecar=... --current=<版本>`
-   - `.fork-marker` 版本不匹配 → 删除旧 fork
-   - 从 `tarballs/minimax-ai-code-<版本>.tgz` 解压；没有就 `npm pack` 下载
-   - 真实拷贝到 `<fork>/code`
-   - 打两处 patch + 重写 sidecar
-3. `exec <mcode 官方 node> <fork>/code/cli.js "$@"`
-
-patcher 失败 → **自动回退到未打 patch 的官方 mcode**，不会卡住你。
-
-### 3.3 自检
+### 3.5 无论哪条路径，改完必须跑
 
 ```bash
-/home/weekbin/orca/projects/mcode/mcode-quota/mcode-quota-doctor
+node tests/parity.mjs        # 新旧渲染逐字节一致（19 项）
+node tests/mcode-smoke.mjs   # 行为回归（87 项）
+./mcode-quota-doctor         # 端到端自检
 ```
 
-期望 `22 ok, 0 warnings, 0 failures`。关键项：
+`parity.mjs` 是**跨策略的护栏**：只要它绿，两条路径就显示同样的东西。
+它曾抓出移植时 `MIN_BAR_WIDTH` 写错（4 vs 8）导致窄屏布局选错分支。
+
+### 3.6 版本升级后的最小验收
 
 ```
-[ok] mcode launcher pristine (no quota hooks)
-[ok] mcode launcher byte-identical to pristine npm tarball
-[ok] fork launcher render hook present
-[ok] fork cli.js imports sidecar statically
-[ok] mcodex does not use NODE_OPTIONS
-[ok] breakdown shown at 200 cols
-[ok] breakdown dropped at 100 cols, 上下文 kept
-[ok] context usage: 上下文 42K/200K 21%
-[ok] separator is │ (U+2502)
-[ok] no mmx process storm (concurrent: 0)
+[ ] mcodex status      -> strategy 与预期一致
+[ ] mcodex doctor      -> 0 failures
+[ ] 真实跑一次 mcode   -> 3 行都在，颜色正常
+[ ] 切一次 session     -> 立刻重绘（不等 10s）
 ```
-
-（`MCODE_QUOTA_TAIL=compact` / `=full` 时对应的明细项会从 ok 降为 info，属预期。）
 
 ---
 

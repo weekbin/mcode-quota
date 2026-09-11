@@ -69,9 +69,24 @@ mcode 0.4.0 起状态栏渲染在基类 `ba.renderViewport(width, height)`，wid
 | 今日 按模型 | message_rows(model) × token_usage 按 turn_id | 60s 文件缓存 |
 | 5h/周 | `mmx quota show` | 60s 文件缓存 |
 
-## 4. 排版
+## 4. 版本升级时的动作
 
-## 0. 总原则
+按策略不同，升级要动的东西差一个数量级：
+
+| 策略 | 升级动作 | 通常要改代码吗 |
+|---|---|---|
+| 原生（≥0.4.0） | `mcode update && mcodex install && mcodex doctor` | **不用**。我们依赖的是配置 schema（`tui.statusLine` / `tui.customStatusLine`）与两处 sqlite 表，是外部契约 |
+| legacy（<0.4.0） | `mcode update && mcodex`（自动重打补丁） | widget 结构真变了才加 `patches/<新版本>/` |
+
+**跨过 0.4.0 那一次**是一次性切换：`mcodex install` 写配置，之后可以删掉 fork
+释放空间。**结论**：原生路径把「每次升级都要重新适配」变成了「只在 mcode 改
+外部契约时才动」。
+
+完整决策树、故障排查、验收清单见 [MAINTENANCE.md](MAINTENANCE.md) §3。
+
+## 5. 排版
+
+## 6. 总原则（两条路径共同）
 
 | 原则 | 实现 |
 |---|---|
@@ -81,7 +96,29 @@ mcode 0.4.0 起状态栏渲染在基类 `ba.renderViewport(width, height)`，wid
 | fork 必须是真实拷贝 | 不用 symlink（Node 默认 realpath，会把相对 import 指回源安装，patch 失效） |
 | 可随时推倒重建 | 删掉 fork 目录，下次 `mcodex` 自动重建 |
 
-## 1. 目录与来源
+## 7. 目录与来源
+
+### 7.1 项目目录（两条路径共用）
+
+```
+mcode-quota/
+├── mcodex                     入口：按 mcode 版本分发 + install/uninstall/status/doctor
+├── mcodex-status              ≥0.4.0 的 custom-command 目标（stdin JSON → 3 行 stdout）
+├── mcodex-install             新机器一次性安装（跨 OS、装依赖、建 PATH 条目）
+├── mcode-quota-doctor         自检（按版本选对应检查集）
+├── lib/
+│   ├── render.mjs             渲染核心（纯函数，无 I/O）—— 两条路径共用
+│   ├── data.mjs               数据层：sqlite 会话/上下文/今日 + mmx 文件缓存
+│   └── config-apply.mjs       config.yaml 文本级合并（幂等、可逆、带备份）
+├── config/<version>/          配置载荷（≥0.4.0 用；含字段说明）
+├── patches/<version>/         fork 补丁（<0.4.0 用）
+├── tests/
+│   ├── parity.mjs             新旧渲染逐字节一致（跨策略护栏）
+│   └── mcode-smoke.mjs        行为回归
+└── *.md                       文档（升级手册在 MAINTENANCE.md §3）
+```
+
+### 7.2 legacy fork 的落盘位置（<0.4.0 专用）
 
 ```
 ~/.local/share/mcode-quota/mcode-clone/
@@ -104,7 +141,9 @@ mcode 0.4.0 起状态栏渲染在基类 `ba.renderViewport(width, height)`，wid
 `npm` tarball 不含 `node_modules/`，所以建 fork 时会从已安装目录**拷贝**一份
 （真实拷贝，不与原安装共享 inode）。
 
-## 2. 两处 patch
+## 8. legacy 路径的两处 patch
+
+> **<0.4.0 专用**。0.4.0 起渲染搬到了基类、且官方提供了 `custom-command`，所以不再注入，见 §1。
 
 ### 2.1 patch 1 — launcher chunk：`render()` 覆盖
 
@@ -151,7 +190,9 @@ import "/home/weekbin/orca/projects/mcode/mcode-quota/sidecar/mcode-quota-fetche
 所有子进程继承，导致每个子进程都加载 sidecar 并各自 fork `mmx` —— 进程风暴的根因。
 改成 cli.js 静态 import 后，只有真正跑 TUI 入口的进程才加载 sidecar。
 
-## 3. Sidecar
+## 9. legacy 路径的 Sidecar
+
+> **<0.4.0 专用**。原生路径改由 `mcodex-status` 脚本承担同样的角色，但由 mcode 通过 `custom-command` 主动调用，不需要 import 注入。
 
 `sidecar/mcode-quota-fetcher-9f8a7b.mjs` 由 patcher 生成（模板内联在 patcher 里），
 与 mcode 共享同一个 V8 isolate，通过 `globalThis` 通信：
@@ -303,7 +344,7 @@ if (!summary || sumTotal(summary) === 0) {
   按 `session_id` 聚合
 - 总量 = `input_tokens + output_tokens + cache_read_tokens`
 
-## 4. 进程风暴防护
+## 10. 进程风暴防护（legacy 路径）
 
 | 防护 | 说明 |
 |---|---|
@@ -315,7 +356,10 @@ if (!summary || sumTotal(summary) === 0) {
 | stderr 上限 | 最多缓存 64KB |
 | 定时器 `unref()` | 不阻止 mcode 退出 |
 
-## 5. 升级兼容性
+## 11. legacy 锚点的升级兼容性
+
+> 本节只适用于 **legacy（<0.4.0）** 路径。原生路径的升级动作见 §4 —— 那里
+> 通常不需要动代码。下面说明 fork 补丁在 mcode 版本变化时如何自我修复。
 
 mcode 升级后：
 
@@ -367,9 +411,30 @@ patches/
 **对 doctor 的影响**：新增 `versioned patches available:` 和 `loader picks patches/X/`
 两行，明示当前 mcode 走了哪个 patch 目录、是否有 fallback。
 
-## 6. 已知限制
+## 12. 已知限制
+
+**原生路径（≥0.4.0）**
+
+- 刷新下限 **10s**（mcode 的 `intervalSeconds` 最小 10）。切 session / 换
+  workspace 会立刻触发一次，所以切的时候不用等。
+- 每次刷新起一个短命进程（实测 ~30ms 热 / ~90ms 冷）。不在 TUI 事件循环里，
+  所以 sqlite 慢也不会卡界面。
+- 首次渲染依赖 mcode 的 tick 或 session-change；启动瞬间可能短暂空白。
+- `customStatusLine.command` 按 argv 解析，**不是 shell** —— 不支持管道/重定向。
+  复杂取数要放进脚本，而不是写在 config 的命令行里。
+- 依赖 mcode 的配置 schema 稳定（比依赖压缩后的内部方法名稳定，但仍是外部契约）。
+
+**legacy 路径（<0.4.0）**
 
 - fork 每个版本占约 62MB（真实拷贝，换来无 realpath 陷阱）
-- sidecar 路径写死在 fork 的 `cli.js` 里；若移动项目目录，需重跑 patcher（`mcodex` 会自动检测并重写）
+- sidecar 路径写死在 fork 的 `cli.js` 里；若移动项目目录，需重跑 patcher
+  （`mcodex` 会自动检测并重写）
+- AST 锚点需要 mcode 保持"继承基类的 widget + `render(width)` 返回 string[]"
+  这套契约；变了就要新增 `patches/<新版本>/`
+
+**两条路径共同**
+
 - 24-bit 颜色需要终端支持
-- `mmx` 是外部依赖，未登录时只显示会话 tokens / 上下文
+- `mmx` 是外部依赖，未登录时 5h/周 行显示缓存值或占位符
+- `<unknown>` 桶（今天未能匹配到 turn→model 的 token）在显示时被过滤；
+  实测全历史占比 0.01%，可忽略

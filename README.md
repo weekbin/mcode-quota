@@ -34,6 +34,19 @@
 ≥ 0.4.0 装好之后**直接跑 `mcode` 也能看到这 3 行** —— `mcodex` 只在安装/自检时
 需要。
 
+## mcode 升级时我要做什么
+
+```bash
+mcode update          # 升级 mcode
+mcodex install        # 刷新配置（幂等；<0.4.0 时无需执行）
+mcodex doctor         # 期望 0 failures
+```
+
+**≥ 0.4.0 绝大多数情况下到此为止** —— 我们只依赖 mcode 的配置 schema 和两处
+sqlite 表，不碰它的内部方法名。完整决策树（含什么时候才需要改代码、跨过 0.4.0
+那次的一次性切换、legacy 路径下怎么加 `patches/<新版本>/`）见
+[MAINTENANCE.md §3](MAINTENANCE.md)。
+
 ## 原生路径怎么工作（≥ 0.4.0）
 
 `mcodex install` 把这段合并进 `~/.minimax/config.yaml`（文本级编辑，保留你文件

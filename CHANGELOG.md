@@ -2,6 +2,32 @@
 
 记录每次对工具集的修改。新条目加在最上面。
 
+## 2026-09-11 — v3.3.1：文档对齐两条策略，补升级手册
+
+v3.3.0 引入原生路径后，`AGENTS.md` / `INSTALL.md` 仍按"只有 fork"写
+（分别 0 次提到 `custom-command`）。逐一更新：
+
+- **`MAINTENANCE.md` §3 重写为「mcode 版本升级时我们的动作」** —— 升级前看
+  版本落在哪一侧、原生路径的常规升级（多半不用改代码）、从 fork 切到原生的
+  一次性动作、legacy 路径下什么时候才要新增 `patches/<新版本>/`、改完必须跑
+  的三个测试、四条最小验收。
+- **`MAINTENANCE.md` §2 架构速览**改为两条策略并列，标注各自写到哪、读哪些数据。
+- **`AGENTS.md`**：`What mcodex is` 改为两策略表并给出 `mcodex status` 自检；
+  `Verifying success` 按策略分列期望项（原生 18 项 / legacy 另加 fork 检查）；
+  决策树补「原生路径完全没块」分支；NOT-do 列表补"别手改 config.yaml、
+  别强推镜像"；安装流程第 8 步说明 ≥0.4.0 不建 fork。
+- **`INSTALL.md`**：开头两策略表；TL;DR 补 `mcodex status`；`Upgrading mcode`
+  改为按策略分述并指向 MAINTENANCE §3；期望输出里的 doctor 项数与首跑文案同步。
+- **`ARCHITECTURE.md`**：新增 §4「版本升级时的动作」（两策略对比 + 跨 0.4.0
+  的一次性切换），旧 §0-6 续编为 §6-12 并标注哪些是 legacy-only；§7 拆成
+  「项目目录」与「legacy fork 落盘位置」；§12 已知限制按策略分列。
+- **`README.md`**：新增「mcode 升级时我要做什么」。
+
+历史 CHANGELOG / DECISIONS 里的旧 doctor 项数（21/22）保持原样 —— 那是当时的
+记录，不是当前状态。
+
+测试未受影响：parity 19/19、smoke 87/87、doctor 18/0/0。
+
 ## 2026-09-11 — v3.3.0：迁移到 mcode 0.4.0 原生 custom-command
 
 ### 背景
