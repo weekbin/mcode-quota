@@ -64,36 +64,16 @@ async function main() {
   const sessionId = payload.session_id || "";
   log("event=" + payload.event + " session=" + sessionId + " model=" + payload.model);
 
-  // No session yet (startup in the picker, or a fresh TUI): emit a 3-line
-  // skeleton that mirrors the real statusline's structure, so the user sees
-  // the bar is "there but waiting" instead of an empty bar that looks like a
-  // bug. mcode 0.4.x's StatusLine renderer hides the whole bottom row when
-  // the custom-command block is empty (see launcher-*:209), so we have to
-  // emit something that survives the renderer + the visual-width truncate.
+  // Always go through collect(), even with an empty sessionId. The data layer
+  // is built so quota (5h/周, from mmx) and today-by-model (aggregate sqlite)
+  // work fine without a session; only session-totals + context-window need a
+  // real sessionId and they short-circuit to null when missing. The renderer
+  // then prints "会话 tokens … │ 上下文 … │ 缓存命中 … │ 轮数 …" for the
+  // 4-chunk row and the real quota + today rows below.
   //
-  // The skeleton uses the same 3-line layout as the active block (4-chunk /
-  // 5h·周 / 今日), with each line carrying its row label and an em-dash
-  // placeholder. Whole-line ANSI dim so it visually reads as "loading",
-  // not as real data. mcode's `Vf` formatter (`colorMode: ansi`) preserves
-  // the dim codes; its `E()` width-truncate uses grapheme/wcwidth so the
-  // dim escapes don't break the column count.
-  if (!sessionId) {
-    const ANSI_DIM = "\x1B[2m";
-    const ANSI_RST = "\x1B[0m";
-    const ws  = (payload.workspace_dir || "").replace(/\/+$/, "").split("/").pop() || "";
-    const mdl = (payload.model || "").split("/").pop() || "";
-    const head = [ws, mdl].filter(Boolean).join(" │ ");
-
-    const headPart = head
-      ? `${head} │ ${ANSI_DIM}— no active session — start or select one to populate${ANSI_RST}`
-      : `${ANSI_DIM}— no active session — start or select one to populate${ANSI_RST}`;
-    const line2 = `${ANSI_DIM}── 5h/周 quota row waiting ──────────────────────────${ANSI_RST}`;
-    const line3 = `${ANSI_DIM}── 今日 by model row waiting ──────────────────────────${ANSI_RST}`;
-
-    process.stdout.write([headPart, line2, line3].join("\n") + "\n");
-    return;
-  }
-
+  // Net effect on the picker / welcome screen: the user sees a real 3-line
+  // statusline with one placeholder row + two live data rows, instead of
+  // either an empty bar (mcode 0.4.x collapses it) or a fully-fake skeleton.
   let state;
   try {
     state = await collect({ sessionId, dbPath: process.env.MCODE_QUOTA_SQLITE || DEFAULT_DB });

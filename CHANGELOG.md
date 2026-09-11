@@ -2,7 +2,60 @@
 
 记录每次对工具集的修改。新条目加在最上面。
 
-## 2026-09-11 — v3.3.3：修 `mcodex-status` 在 picker/welcome 屏静默 → mcode 0.4.x 整条底栏消失
+## 2026-09-11 — v3.3.3：修 `mcodex-status` 无 sessionId 时整条底栏消失
+
+mcode ≥ 0.4.0 的 `va` StatusLine 渲染逻辑（`launcher-U2WCORIY.js:209` 与
+0.4.0 同样位置逐字相同）：
+
+```js
+return u.length===0 && l.length===0 ? [] : ...;
+```
+
+——**只要 custom-command 那块没输出，连同所有 regular items（current-dir /
+model / git-branch 等）整条底栏一起不画**。
+
+旧 `mcodex-status` 在 `!sessionId` 时早 return（注释："transient rows
+are not worth the flicker"）—— 假设 mcode < 0.4.0 没有 statusline
+概念、picking 屏本就不画底栏。**但 mcode ≥ 0.4.0 的策略反了**：picker
+屏 / welcome 屏仍然画底栏，只是不画 custom block；custom block 空 → 整
+条底栏不渲染 → 用户看到的是"无 session 时底栏消失"，而 `mcode -c` /
+进入 active session 后底栏才出现，看起来像 `mcode` 与 `mcode -c` 行为不
+同，其实是同一个机制在两种 session 状态下的表现不同。
+
+修复链路经过两轮迭代：
+
+**v3.3.3a — `mcodex-status` 在 `!sessionId` 时调用 `collect({ sessionId: "" })`**，
+而不是早 return。`collect` 数据层已经具备"部分数据可独立于 sessionId 获
+取"的能力：
+
+| 数据源 | 需要 sessionId | 原因 |
+|---|---|---|
+| `fetchSessionTotals(db, sid)` | ✓ | SQL `WHERE session_id = ?` |
+| `fetchContext(db, sid)` | ✓ | SQL `WHERE session_id = ?` |
+| `fetchTodayByModel(db, cacheDir)` | ✗ | 跨 session 聚合（SQLite aggregate） |
+| `fetchQuota(cacheDir)` | ✗ | 走 mmx CLI + 本地 cache |
+
+旧 `fetchSessionTotals` / `fetchContext` 已有 `if (!db \|\| !sessionId) return null`
+短路；`fetchTodayByModel` / `fetchQuota` 不需要 sessionId。**所以让
+`collect({ sessionId: "" })` 走完整路径，自然拿到 quota + today，
+session/context 是 null，被 `buildStatusLines` 现有的 placeholder
+逻辑渲染成"会话 tokens … │ 上下文 … │ 缓存命中 … │ 轮数 …"**。
+
+效果：
+
+| 启动 | sessionId | 4-chunk 行 | 5h/周 行 | 今日 行 |
+|---|---|---|---|---|
+| `mcode` plain（picker） | 无 | placeholder | **真实** | **真实** |
+| `mcode -c`（续会话） | 有 | 真实 | 真实 | 真实 |
+| `mcode` 选了空 session | 无 | placeholder | 真实 | 真实 |
+
+不再有"picker 屏底栏消失"或"mcode vs mcode -c 行为不同"的现象。
+
+**v3.3.3b（被 v3.3.3a 覆盖）** — 早期的"3 行 ANSI dim 骨架屏"方案不再需
+要：它把 5h/周 和 今日 那两行也写成"waiting"，但实际上 quota + today
+的实时数据任何时间都能拿到，骨架屏反而遮蔽了信息。已删除。
+
+## 2026-09-11 — v3.3.2：新增 `mcodex-status-compact`，窄屏 1 行变体
 
 mcode ≥ 0.4.0 的 `va` StatusLine 渲染逻辑（`launcher-U2WCORIY.js:209` 与
 0.4.0 同样位置逐字相同）：
