@@ -20,6 +20,48 @@ mcodex
 
 ---
 
+## 1.5 原生路径（mcode >= 0.4.0）—— 日常大多数情况
+
+```bash
+mcodex status      # 看当前策略 / 配置是否就位
+mcodex install     # 写入/刷新 config.yaml（幂等）
+mcodex uninstall   # 移除我们的两个键（往返字节级一致）
+mcodex doctor      # 自检
+```
+
+排障顺序：
+
+1. **状态栏没有我们的 3 行**
+   - `mcodex status` 看 `config applied`。否 → `mcodex install`。
+   - 确认 `tui.statusLine` 里有 `custom-command`，且 `tui.customStatusLine.command`
+     指向一个**可执行**文件。
+   - 手动跑一次，看它到底输出什么：
+     ```bash
+     printf '{"protocol":1,"event":"interval","session_id":"<某个 mvs_…>","workspace_dir":"/tmp","model":"-","tui_version":"0.4.0"}\n' | COLUMNS=200 ./mcodex-status
+     ```
+     有输出 → 问题在 mcode 侧（配置没生效/被覆盖）；无输出 → 见下一条。
+   - `MCODEX_STATUS_DEBUG=1` 再跑一次，stderr 会说明是取数失败还是渲染失败。
+
+2. **只有部分行**（例如缺 5h/周）
+   - 那是 mmx 的问题：`mmx quota show --output json --quiet` 手动跑一次。
+   - 配额与今日统计各有 60s 文件缓存，清掉 `~/.cache/mcodex/` 可强制刷新。
+
+3. **数字不对**
+   - 先清 `~/.cache/mcodex/` 重试。
+   - 会话 token 很小 → 检查 sqlite 是否有该 session 的 `local_runtime_token_usage`。
+   - 上下文百分比与 mcode 原生 `Context N% left` 不互补 → 取该 session 最新
+     assistant 行的 `context_usage` 对比：
+     ```bash
+     sqlite3 ~/.minimax/v2/sqlite/runtime-state.sqlite \
+       "SELECT json_extract(data_json,'$.context_usage') FROM local_runtime_message_rows \
+        WHERE session_id='<sid>' ORDER BY id DESC LIMIT 1"
+     ```
+
+4. **改完 config 想还原**
+   - `mcodex uninstall`，或恢复一次性备份 `~/.minimax/config.yaml.mcodex-backup`。
+
+---
+
 ## 2. 架构速览
 
 ```

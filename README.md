@@ -1,50 +1,104 @@
-# mcodex — mcode 状态栏配额 / token 用量
+# mcodex — mcode 配额 / token 状态栏
 
-在 mcode TUI 状态栏下面显示：
-
-- **小时会话窗口** — 当前 5 小时窗口剩余百分比 + 进度条 + 重置倒计时
-- **周限制使用量** — 当前周窗口剩余百分比 + 进度条 + 重置倒计时
-- **会话 tokens** — 当前会话累计 token（输入 / 输出 / 缓存）
-- **上下文** — 上下文窗口 **已用/总量 + 已用百分比**（如 `42K/200K 21%`），≥75% 变暗橙、≥90% 变暗红，提示该 `/compact` 了
-
-数据来自 `mmx quota show` 和 mcode runtime / sqlite，全部带 24-bit 颜色分级。
-
-## 核心设计：环境隔离，绝不改 mcode
-
-早期版本直接 patch `~/.minimax-code` 里 mcode 本体的 launcher，结果一旦 patch 有 bug，
-**用 mcode 排查问题时排查不到根源**，还会不断拉起僵尸进程。现在改成：
+在 mcode 的状态栏下方显示 3 行：
 
 ```
-mcode 本体（只读，字节级等于 npm 官方包）
-        ▲
-        │ 从不写入
-        │
-mcodex ─┴─> 私有 fork：~/.local/share/mcode-quota/mcode-clone/<版本>/code/
-             （从 npm 官方 tarball 解压出来的完整真实拷贝）
-             └── 只在这里打两个 patch
+~/orca/projects/mcode/mcode-quota │ ◇ 打招呼 │ ⎇ master │ Full access │ ✦ MiniMax-M3 · Thinking On │ Context 95% left │ Cache 98%
+会话 tokens 644.88M 「输入 8.01M │ 输出 1.41M │ 缓存 635.45M」 │ 上下文 43% 「425.84K/1.00M」 │ 缓存命中 99% │ 轮数 97
+小时会话窗口 [███████████░░░░░░░░░] 55% 剩余 │ 重置 2h 6m │ 周限制使用量 [███████████████████░] 97% 剩余 │ 重置 2d 11h
+今日 「MiniMax-M3」 170.19M │ 「deepseek-flash」 53.25M
 ```
 
-- **mcode 本体永不被修改**。fork 是从 npm registry 下载的**干净 tarball**解压而来，
-  不是从已安装目录复制（避免把污染带进 fork）。
-- fork 是**真实拷贝**（不是 symlink）—— 避免 Node realpath 解析把相对 import 指回源安装。
-- fork 坏了？直接删掉重新生成，mcode 毫发无损。
-- `mcode-quota-doctor` 会校验 mcode launcher 与 npm 官方包**字节一致**。
+## 按 mcode 版本分两条策略
 
-## 入口
+| mcode | 做法 | 修改 mcode |
+|---|---|---|
+| **≥ 0.4.0** | 用 mcode 原生的 `custom-command` 状态栏项跑 `mcodex-status` 脚本 | **0 字节** |
+| **< 0.4.0** | 私有 pristine-tarball fork + `patches/<version>/` 注入 | 0 字节（fork 是副本） |
+
+两条策略共用同一个渲染核心 `lib/render.mjs`，并用 `tests/parity.mjs` 在 18 个
+宽度上逐字节锁定输出一致。
+
+## 快速开始
 
 ```bash
-mcodex            # 任何目录都可以（~/.minimax/bin/mcodex 在 PATH 上）
-mcodex --help
+./mcodex install     # 写入 config.yaml（≥0.4.0）或说明 legacy 无需安装
+./mcodex status      # 当前策略、配置状态
+./mcodex doctor      # 自检
+./mcodex             # 确保已安装，然后启动 mcode
 ```
 
-`mcodex` 做的事：
-1. 读 `~/.minimax-code/current` 拿当前版本
-2. 跑 `patches/_loader.mjs`（幂等，已就绪时 <1s）—— loader 选 `patches/<当前 mcode 版本>/mcode-patch-quota.mjs`
-3. `exec <mcode 官方 node> <fork>/code/cli.js "$@"`
+≥ 0.4.0 装好之后**直接跑 `mcode` 也能看到这 3 行** —— `mcodex` 只在安装/自检时
+需要。
 
-**找不到精确版本时**（比如新版 mcode 刚发布还没建 patches/ 目录）—— loader 自动回退到**最接近的 `<=` 版本**，并打 stderr 警告；老用户继续可用。
+## 原生路径怎么工作（≥ 0.4.0）
 
-patcher 失败时自动回退到**未打 patch 的官方 mcode**，不会卡住你。
+`mcodex install` 把这段合并进 `~/.minimax/config.yaml`（文本级编辑，保留你文件
+里的注释与排版，幂等，带一次性 `.mcodex-backup`）：
+
+```yaml
+tui:
+  statusLine:
+    - ...既有项...
+    - custom-command
+  customStatusLine:
+    command: <repo>/mcodex-status
+    display: block
+    position: below
+    maxLines: 3
+    intervalSeconds: 10
+    timeoutMs: 5000
+    colorMode: ansi
+```
+
+mcode 在 startup / session 切换 / 每 10s 调用脚本，向它的 **stdin** 写一行：
+
+```json
+{"protocol":1,"event":"interval","session_id":"mvs_…","workspace_dir":"…",
+ "model":"MiniMax-M3","session_title":"打招呼","tui_version":"0.4.0"}
+```
+
+脚本把 3 行写到 **stdout**，mcode 渲染在原生状态栏下方。
+
+## 数据来源
+
+| 数据 | 来源 | 刷新 |
+|---|---|---|
+| session_id / model / 标题 | mcode 的 stdin JSON | 每 tick |
+| 会话 tokens（输入/输出/缓存/总量）+ 轮数 | sqlite `local_runtime_token_usage` 按 session **SUM** | 每 tick |
+| 上下文 已用/窗口 | sqlite assistant 行的 `context_usage.usedTokens` / `contextWindowTokens` | 每 tick |
+| 缓存命中 | 由上面的 cache_read 与 input 计算 | 每 tick |
+| 今日 按模型 | sqlite message rows（model）× token_usage（总量）按 turn_id 关联 | 60s 文件缓存 |
+| 小时会话窗口 / 周限制使用量 | `mmx quota show --output json` | 60s 文件缓存 |
+
+> 上下文窗口**不**从 `config.yaml` 的 `limit.context` 取：那是静态声明值
+> （MiniMax-M3 写 512000），而实际生效窗口可能是 1000000。见 DECISIONS D31。
+
+## 文件
+
+```
+mcodex                   入口：按 mcode 版本分发
+mcodex-status            ≥0.4.0 的 custom-command 目标脚本
+mcode-quota-doctor       自检（双路径）
+lib/render.mjs           渲染核心（纯函数；两条路径共用）
+lib/data.mjs             数据层（sqlite / mmx / 缓存）
+lib/config-apply.mjs     config.yaml 文本级合并
+config/0.4.0/            配置载荷（说明 + 参考）
+patches/                 legacy fork 补丁（<0.4.0）
+tests/parity.mjs         新旧渲染逐字节一致性
+tests/mcode-smoke.mjs    行为回归
+```
+
+## 环境变量
+
+| 变量 | 作用 |
+|---|---|
+| `MCODE_QUOTA_TAIL` | `auto`（默认）/ `full` / `compact` —— 明细的显示策略 |
+| `MCODE_QUOTA_TTL_MS` | mmx 配额缓存 TTL（默认 60000） |
+| `MCODE_QUOTA_TODAY_TTL_MS` | 今日统计缓存 TTL（默认 60000） |
+| `MCODEX_CACHE_DIR` | 缓存目录（默认 `~/.cache/mcodex`） |
+| `MCODEX_STATUS_DEBUG=1` | 脚本诊断到 stderr |
+| `MCODE_QUOTA_DEBUG=1` | `mcodex` 诊断 |
 
 ## 效果
 
@@ -121,108 +175,24 @@ patcher 失败时自动回退到**未打 patch 的官方 mcode**，不会卡住�
 | ≤ 20% | 暗红 | `(200,80,80)` |
 | 无数据 | 灰 | `(140,140,140)` |
 
-## 文件
-
-```
-/home/weekbin/orca/projects/mcode/mcode-quota/   # 工具集（git 仓库，single source of truth）
-├── mcodex                       # 入口 wrapper
-├── mcode-quota-doctor           # 自检（21 项）
-├── mcodex-push-remote           # GitHub 私有 mirror 同步
-├── patches/                     # 按 mcode 版本分目录的 patcher
-│   ├── _loader.mjs              #   按 --current 选 patches/<v>/
-│   ├── 0.3.10/                  #   mcode 0.3.10 适配
-│   │   ├── mcode-patch-quota.mjs
-│   │   ├── mcode-find-anchors.mjs
-│   │   └── NOTES.md             #   该版本的 widget 签名 / 决策 / 已知问题
-│   └── 0.3.11/                  #   mcode 0.3.11 适配（与 0.3.10 同源）
-├── tests/                       # 升级漂移回归
-│   ├── mcode-smoke.mjs          #   5 模拟升级场景 + 25 断言
-│   └── README.md
-├── sidecar/                     # patcher 生成的 sidecar（不要手改，gitignore）
-└── README / ARCHITECTURE / DECISIONS / MAINTENANCE / CHANGELOG
-
-~/.minimax/bin/mcodex                                            # PATH 入口（250 字节 stub）
-~/.local/share/mcode-quota/mcode-clone/tarballs/                 # 官方 tarball 缓存
-~/.local/share/mcode-quota/mcode-clone/.pristine-<版本>/         # 解压出的纯净源码
-~/.local/share/mcode-quota/mcode-clone/<版本>/code/              # 打了 patch 的 fork
-```
-
-**版本目录机制**：每个 mcode 版本有自己的 `patches/<v>/` 目录。当 mcode 升级改了 widget 字段时，**只在新版本目录里改 patcher** —— 老目录保持不变，老用户继续拿老 patcher 跑（`mcodex-push-remote` 同步和回滚都不受影响）。loader 不知道 mcode 长啥样，它只看版本号字符串。
-
-## 安装 / 使用
-
-```bash
-# 首次：什么都不用手动做，直接跑（会自动下载 tarball 并建 fork）
-mcodex
-
-# 自检
-/home/weekbin/orca/projects/mcode/mcode-quota/mcode-quota-doctor
-```
-
-## 升级 mcode
-
-```bash
-mcode update      # 官方升级
-mcodex            # 直接跑：检测到版本变化会自动重新下载 tarball、重建 fork
-mcode-quota-doctor
-```
-
-不需要手动跑 patcher，`mcodex` 每次启动都会做幂等检查。
-
-## 数据源与刷新
-
-| 数据 | 来源 | TTL | 超时 |
-|---|---|---|---|
-| 小时会话窗口 / 周限制使用量 | `mmx quota show --output json --quiet` | 60s | 20s |
-| 会话 tokens | runtime `getSessionUsageSummary` → sqlite `local_runtime_token_usage` 兜底 | 10s | — |
-| 上下文 | shellState `contextUsage`（runtime `getContextSnapshot`，mcode 自己的 `Context N% left` 用的同一份数据） | 随渲染实时读取 | — |
-| 缓存命中 | sqlite `SUM(cache_read_tokens) / (SUM(cache_read_tokens) + SUM(input_tokens))` | 10s（随会话轮询） | — |
-| 轮数 | sqlite `COUNT(DISTINCT turn_id)` | 10s（随会话轮询） | — |
-| 今日 按 LLM 模型 | sqlite `local_runtime_message_rows.data_json.context_usage_telemetry.model` 关联 `local_runtime_token_usage.turn_id` 聚合 | 60s | — |
-
-会话 token 总量 = `input_tokens + output_tokens + cache_read_tokens`。
-
-**缓存命中** 颜色：≥90% 深绿、≥70% 暗黄绿、否则暗橙。
-**轮数** 中性灰，仅在有数据时显示。
-
-**上下文显示** = `已用/总量 百分比`，例如 `上下文 42K/200K 21%`。
-
-- 百分比 = `round(usedTokens / contextWindowTokens × 100)`，取**已用**占比
-  （mcode 原生显示的是剩余占比，这里取补数，因为"涨到 100% 就该压缩了"更直观）
-- 窗口大小优先取 `contextUsage.contextWindowTokens`，缺失时回落 shellState 顶层的 `contextWindowTokens`
-- 数字用与 `会话 tokens` 相同的格式化（`1M` / `1.5M` / `200K` / `42K`）
-
-**兜底逻辑**：runtime API 有时在 turn 落库前返回全 0，或返回结构不符预期。
-此时会自动回落到 sqlite；只有两边都没有真实数字时才显示 0。
-
-## 为什么不会再有僵尸进程风暴
-
-旧版本用 `NODE_OPTIONS=--import=<sidecar>` 注入，**这个环境变量会被 mcode 派生的每一个子进程继承**，
-每个子进程都启动一个 `mmx` 轮询器 → 进程数指数级爆炸。
-
-现在：
-
-1. **不用 `NODE_OPTIONS`** —— sidecar 由 fork 的 `cli.js` 静态 `import`，只有 TUI 入口进程会加载它。
-2. **sidecar 不自动启动** —— 轮询器在**第一次状态栏渲染**时才启动（这是"真的是 TUI"的可靠信号）。
-   子进程即使加载了 sidecar 也不会 fork 任何东西。
-3. **进程防护** —— `spawn(detached:true)` + 进程组 SIGKILL 兜底；PATH 上没 `mmx` 直接跳过；
-   连续失败 5 次后停用，5 分钟后自动恢复；stderr 截断 64KB。
-
 ## 已知 trade-offs
 
-- 每 60s fork 一次 `mmx`（约 5s，可忽略；`unref` 的定时器不阻止退出）
-- 首次渲染时 quota 行可能先空约 1–6s，数据到达后自动重绘
-- 24-bit 颜色需要终端支持（现代终端都支持）
-- `mmx` 是外部依赖：不在 PATH 或未登录时，只显示会话 tokens / 上下文行
-- 自动化测试用 `script -qfc` 起的伪 TTY 默认 80 列，会落到三行紧凑布局；
-  想看单行带明细的效果，用真实终端或把 pty 窗口设成 ≥150 列
+- **≥0.4.0 刷新下限 10s** —— mcode 的 `intervalSeconds` 最小 10。会话切换会立刻
+  触发一次，所以切 session 时不会等。
+- **每次刷新一个短命进程**（实测 ~30ms 热 / ~90ms 冷）。10s 一次约 0.3% CPU。
+  因为不在 TUI 事件循环里，即使 sqlite 扫描慢也不会卡界面。
+- **mmx 与今日统计走文件缓存**（各 60s），避免每 10s 重跑。
+- 首次渲染依赖 mcode 的 tick 或 session-change；启动瞬间可能短暂空白。
+- 24-bit 颜色需要终端支持；`colorMode: ansi` 下 mcode 原样透传。
+- **<0.4.0 仍走 fork** —— 那条路径每次 mcode 升级可能要重新适配 AST 锚点。
+- `mmx` 不在 PATH 或未登录时，5h/周 行显示缓存值或占位符。
 
 ## 文档
 
 | 文档 | 内容 |
 |---|---|
 | [README.md](README.md) | 怎么用、效果、数据源、trade-off |
-| [ARCHITECTURE.md](ARCHITECTURE.md) | 隔离架构、两处 patch、sidecar 数据流、排版 |
-| [DECISIONS.md](DECISIONS.md) | **方案与决策记录**：每个设计问题的候选、选择、理由、代价、证据 |
-| [MAINTENANCE.md](MAINTENANCE.md) | 故障诊断、重派生锚点、还原 mcode |
+| [ARCHITECTURE.md](ARCHITECTURE.md) | 两条策略的隔离架构、数据流、排版 |
+| [DECISIONS.md](DECISIONS.md) | 方案与决策记录：候选、选择、理由、代价、证据 |
+| [MAINTENANCE.md](MAINTENANCE.md) | 故障诊断、mcode 升级、还原 |
 | [CHANGELOG.md](CHANGELOG.md) | 每次改动记录 |

@@ -1,0 +1,91 @@
+#!/usr/bin/env node
+// mcodex-status — the `custom-command` target for mcode 0.4.0+.
+//
+// mcode runs this on startup, on session/workspace change, and every
+// `intervalSeconds`, writing one JSON line to stdin and rendering the first
+// `maxLines` lines of stdout underneath its built-in status row:
+//
+//   {"protocol":1,"event":"interval","session_id":"mvs_…",
+//    "workspace_dir":"/path","model":"MiniMax-M3","session_title":"…",
+//    "tui_version":"0.4.0"}
+//
+// We answer with the same three rows the fork used to inject:
+//
+//   会话 tokens 644.88M 「输入 8.01M │ 输出 1.41M │ 缓存 635.45M」 │ 上下文 43% 「425.84K/1.00M」 │ 缓存命中 99% │ 轮数 97
+//   小时会话窗口 [███████████░░░░░░░░░] 55% 剩余 │ 重置 2h 6m │ 周限制使用量 [███████████████████░] 97% 剩余 │ 重置 2d 11h
+//   今日 「MiniMax-M3」 170.19M │ 「deepseek-flash」 53.25M
+//
+// Nothing here patches mcode. Configure it via `mcodex install` (see
+// config/0.4.0/tui.statusline.yaml) and plain `mcode` shows the rows.
+//
+// Exit behaviour: print nothing and exit 0 on any problem. mcode renders an
+// empty block rather than an error, so a broken status script can never take
+// the TUI down with it — the same containment the fork's try/catch provided.
+
+import { buildStatusLines } from "./lib/render.mjs";
+import { collect, DEFAULT_DB } from "./lib/data.mjs";
+
+const DEBUG = process.env.MCODEX_STATUS_DEBUG === "1";
+const log = (m) => { if (DEBUG) process.stderr.write("[mcodex-status] " + m + "\n"); };
+
+function readStdin() {
+  return new Promise((resolve) => {
+    let buf = "";
+    let done = false;
+    const finish = () => { if (!done) { done = true; resolve(buf); } };
+    // No stdin (or a TTY): don't hang. mcode always writes a line, so this is
+    // only for manual invocation.
+    if (process.stdin.isTTY) { finish(); return; }
+    process.stdin.setEncoding("utf-8");
+    process.stdin.on("data", (c) => {
+      buf += c;
+      if (buf.includes("\n")) { try { process.stdin.pause(); } catch {} finish(); }
+    });
+    process.stdin.on("end", finish);
+    process.stdin.on("error", finish);
+    setTimeout(finish, 3000).unref?.();
+  });
+}
+
+function width() {
+  const env = Number(process.env.COLUMNS);
+  if (Number.isFinite(env) && env > 0) return env;
+  const t = Number(process.stdout.columns);
+  if (Number.isFinite(t) && t > 0) return t;
+  return 120;   // mcode truncates to the real width anyway
+}
+
+async function main() {
+  const raw = await readStdin();
+  let payload = null;
+  try { payload = JSON.parse(raw.trim().split("\n").pop() || "{}"); } catch { payload = null; }
+  if (!payload) { log("no/invalid stdin payload"); return; }
+
+  const sessionId = payload.session_id || "";
+  log("event=" + payload.event + " session=" + sessionId + " model=" + payload.model);
+
+  // No session yet (startup in the picker, or a fresh TUI): print nothing.
+  // The 4-chunk row would be pure placeholders and the transient rows are not
+  // worth the flicker.
+  if (!sessionId) return;
+
+  let state;
+  try {
+    state = await collect({ sessionId, dbPath: process.env.MCODE_QUOTA_SQLITE || DEFAULT_DB });
+  } catch (e) {
+    log("collect failed: " + (e && e.message));
+    return;
+  }
+
+  let lines = [];
+  try {
+    lines = buildStatusLines(state, width());
+  } catch (e) {
+    log("render failed: " + (e && e.stack || e));
+    return;
+  }
+  if (!lines.length) return;
+  process.stdout.write(lines.join("\n") + "\n");
+}
+
+main().catch((e) => { log("fatal: " + (e && e.stack || e)); });

@@ -41,6 +41,8 @@ CHANGELOG 讲**改了什么**。
 | D27 | patcher 按 mcode 版本分目录 | `patches/<v>/mcode-patch-quota.mjs` + `_loader.mjs` 按 `--current` 选目录，找不到精确匹配时回退到最近 `<=` 版本 | 单 patcher 文件让"老 mcode 用户拉新 master"不匹配、git history 把 0.3.10/0.3.11 决策混在一根 branch | v3.1.0 |
 | D28 | mcode render 框架接受任意多元素；3 行布局可用 | `super.render` 返 `["", r]`（2 元素），PATCH_RENDER 用 v3.0.0 风格 `[...r, ..._qr]` 把 2 + 3 = 5 元素全推给 framework，pty 实测全部 paint。首版 ship 误判 framework 裁到 2，是因为用 stderr debug 误读了 framework 控制流；改 file-based log 后确认 5 元素都画 | v3.2.0 重做后 |
 | D29 | 注入点的异常必须就地兜住；无索引大表的时间过滤查询改 rowid 增量 | (1) `PATCH_RENDER` 把 sidecar 调用包进 try/catch，catch 里 `_qr=[]` 降级 + 记录 `__mcodeQuotaLastError` —— 实测注入 throw：无守卫 268 B 即死 / 有守卫 12153 B rc=0。(2) `local_runtime_message_rows` 无 `created_at_ms` 索引 + 5 KB/行 data_json，时间过滤扫描 84.6 ms/次且同步阻塞事件循环；改用 `id > lastId` 增量（每天 warm 一次 89.9 ms），稳态 0.03 ms，`EXPLAIN` 确认走 rowid SEARCH。`id` 列用 PRAGMA 探测，缺失时回退时间过滤 | v3.2.4 |
+| D30 | mcode ≥0.4.0 走原生 `custom-command`，<0.4.0 保留 fork 补丁 | 0.4.0 把状态栏渲染从 widget 子类搬到基类：实测 `t1.render` 被调用 **0** 次、`ba.renderViewport(w,h)` 22 次，注入子类 render 是死代码。同时 0.4.0 新增 `custom-command` 状态栏项 —— 官方扩展点，喂 stdin JSON、渲染最多 5 行 stdout。迁到它之后修改 mcode **0 字节**、无 fork（省 ~118MB/版本）、升级不再需要适配；代价是刷新下限 10s 且每次起一个 ~30ms 短命进程。`mcodex` 按版本分发。显示内容用 `tests/parity.mjs` 在 18 个宽度上逐字节锁定与旧补丁一致 | v3.3.0 |
+| D31 | 会话 token 必须 SUM；上下文窗口取 sqlite 而非 config.yaml | (1) 旧 SQL 是裸列 + `COUNT(DISTINCT turn_id)`，SQLite 按聚合查询处理，裸列返回**任意一行**的值 —— 实测某 session 显示 input 21,484 而正确 SUM 是 7,997,785。日常被 runtime API 掩盖，doctor 与无 runtime 环境一直显示错值。(2) 上下文窗口不能读 config.yaml 的 `limit.context`（静态声明 512000），实际生效窗口是 1000000；改用 assistant 行的 `context_usage.contextWindowTokens/usedTokens` | v3.3.0 |
 
 ---
 
@@ -879,6 +881,124 @@ turn→model 映射，而它的 `token_usage.ts` 不在今天范围，本来就�
   （`sumTotal > 0`）优先采用，忽略更完整的 sqlite。会话令牌单调递增，
   若观察到偏差可改为取较大者。
 - `<unknown>` 桶（未匹配到 model 的 token）显示时被过滤；全历史占 0.01%。
+
+### D30 — mcode ≥0.4.0 走原生 custom-command；<0.4.0 保留 fork 补丁
+
+**触发**：mcode 升级到 0.4.0 后补丁在真实 TUI 里完全失效（状态栏正常，我们的
+3 行全无）。
+
+**定位过程**：给 fork 的 launcher 插桩，把 `t1.render` / `ba.render` /
+`ba.renderViewport` 的调用数打到 stderr，160 列 pty 跑 18 秒：
+
+| 方法 | 调用次数 |
+|---|---|
+| `t1.render`（我们注入的覆写） | **0** |
+| `ba.render` | 2 |
+| `ba.renderViewport(e,t)` | **22** |
+
+0.4.0 把绘制搬到了基类 `ba.renderViewport(width, height)`，`t1` 退化成控制器
+（管 items / git 刷新 / custom status）。我们注入子类的 `render` 是死代码。
+
+同时发现 0.4.0 新增 `/statusline` 命令与 `custom-command` 状态栏项 —— 一个
+**官方扩展点**：
+
+- 配置在 `~/.minimax/config.yaml` 的 `tui.statusLine`（数组，含
+  `custom-command`）+ `tui.customStatusLine`（对象）
+- 触发：`startup` / `session-change` / `workspace-change` / `interval`
+  （`intervalSeconds` 最小 10）
+- 脚本从 **stdin** 收一行 JSON：`session_id` / `model` / `session_title` /
+  `workspace_dir` / `event` / `tui_version`
+- stdout 最多 `maxLines`（1..5，默认 3）行，渲染在原生项**上方或下方**
+  （`position: below` → `["", ...原生项, ...我们的块]`）
+- `colorMode: ansi` 原样保留 24-bit 颜色；stdout 上限 8 KB
+- `command` 按 argv 解析（**不是 shell**，不支持管道/重定向）
+
+**候选对比**：
+
+| 方案 | 修改 mcode | 升级韧性 | 磁盘 | 复杂度 |
+|---|---|---|---|---|
+| (a) 继续修 fork（改注入到 `ba.renderViewport`） | 2 处 | 每次适配 | ~118 MB/版本 | 高（AST finder + patcher + 版本目录） |
+| (b) **原生 custom-command** | **0** | 配置 API | 0 | 1 脚本 + 4 模块 |
+| (c) 双轨并存 | 2 处 | 中 | 118 MB | 最高 |
+
+**选 (b)**，且按用户要求**保留 (a) 给 <0.4.0**（那里没有 custom-command）。
+
+**PoC 先验证再动手**：先用一个只输出 3 行标记的 `/tmp` 脚本 + 一份临时配置，
+在**官方未打补丁的 mcode** 上跑通，确认 stdin 里真的带 `session_id`（
+`session-change` 与 `interval` 事件都带），再开始写正式实现。
+
+**关键约束**：显示内容必须与旧补丁**逐字节一致**。为此把所有格式化逻辑抽成
+`lib/render.mjs`，并写 `tests/parity.mjs` 把同一组合成输入喂给旧 sidecar 与
+新 lib，在 18 个宽度上比对原始字符串（含 ANSI）。
+
+**parity 的即时价值**：它当场抓出我移植时的一个真实错误 —— `MIN_BAR_WIDTH`
+写成 4 而实际是 8。因为 `buildBar()` 会把 bar 宽度**向上 clamp** 到该下限，
+`fit()` 的第二段循环（bar = MIN-1 … 1）实际是 no-op；下限写错会让组合行的
+计算宽度少 4 列，在 width 90 处把一个完整的布局分支（合并行 vs 堆叠行）选反。
+
+**未做**：
+
+- ❌ 让 `mcodex` 在 0.4.0 上继续建 fork（无意义，且每次启动多一次 fork 检查）
+- ❌ 保留 `patches/0.4.0/`（0.4.0 不再需要补丁；已删除）
+- ❌ 把 config.yaml 解析后重新序列化（会毁掉用户手写的注释与排版；改为文本级
+  只改我们拥有的两个键）
+
+**观察**：
+
+- 原生路径首次渲染依赖 mcode 自己的 10s tick 或 session-change 事件；启动瞬间
+  可能短暂空白，随后填充。
+- `command` 不是 shell。若将来需要更复杂的取数，应把逻辑放进脚本而不是
+  config 里的命令行。
+
+### D31 — 会话 token 必须 SUM；上下文窗口取 sqlite 而非 config.yaml
+
+**D31.1 会话 token 从未求和**
+
+移植 parity 时发现旧 sidecar 的 session SQL 有真实缺陷：
+
+```sql
+SELECT COALESCE(input_tokens, 0) AS inputTokens, ... COUNT(DISTINCT turn_id) AS turns
+FROM local_runtime_token_usage WHERE session_id = ?
+```
+
+SQLite 见到聚合函数（`COUNT`）就把整条查询按聚合处理，此时**裸列返回任意一行
+的值**。所以 "会话 tokens" 一直显示的是**某一轮**的 token。实测：
+
+| 本机某 session | 旧（裸列） | 正确（SUM） | 倍数 |
+|---|---|---|---|
+| input | 21,484 | 7,997,785 | 372× |
+| output | 319 | 1,384,289 | 4340× |
+| cache_read | 3,344 | 623,706,505 | 186,500× |
+
+日常看不出来，是因为 sidecar 优先用 runtime API（它返回正确值）。一旦走到
+sqlite 兜底 —— doctor 的 live render、任何无 runtime 的环境 —— 就显示错值。
+
+**新架构必须修**：custom-command 是子进程，拿不到 runtime，只能走 sqlite。
+
+**未做**：不把这个错误的旧值当作"兼容目标"。用户要求的是"显示内容和以前一致"，
+指的是真实 TUI 里那条（正确）的显示，不是 sqlite 兜底的 bug 输出。
+
+**D31.2 上下文窗口**
+
+原计划从 `config.yaml` 的 `provider.*.models.*.limit.context` 推导窗口（用户
+选择的方案）。核查后发现它是**静态声明值**：
+
+```yaml
+minimax/MiniMax-M3:  limit.context=512000   windowOptions=[512000, 1000000]
+```
+
+而实际生效窗口是 **1000000**（用户已切到 1M 选项）—— 按 config 推导会显示
+82% 而非真实的 42%，差 2 倍。
+
+改用 sqlite 中 assistant 行的 `context_usage.contextWindowTokens`（窗口）与
+`context_usage.usedTokens`（已用），取该 session 最新一行：
+
+- 是 mcode 当轮**实际解析**的值，逐行变化
+- 自动消解 `contextWindowOptions` 二选一的歧义（无需知道用户选了哪个）
+- 同一行取两个值，used/window 天然一致
+
+**交叉验证**：真实 TUI 里我们的 `上下文 5%` 与 mcode 原生 `Context 95% left`
+互为补数 ✓。
 
 ### 观察中
 

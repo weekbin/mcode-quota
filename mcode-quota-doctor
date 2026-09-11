@@ -1,11 +1,18 @@
 #!/usr/bin/env bash
-# mcodex doctor — verify the fork-isolated quota status line.
+# mcodex doctor — verify the quota/token status rows.
 #
 # Exit 0 = all good; non-zero = something needs attention.
 #
-# Key invariant this script exists to protect:
-#   mcode's own installation must be BYTE-IDENTICAL to the npm release.
-#   All patching happens in a private fork, never in mcode.
+# There are two eras, and the invariants differ:
+#
+#   mcode >= 0.4.0 (native)  — mcodex writes a config entry and mcode's own
+#       `custom-command` status item runs mcodex-status. The invariant is
+#       "mcode untouched AND the config points at a working script".
+#
+#   mcode <  0.4.0 (legacy)  — a private pristine-tarball fork is patched.
+#       The invariant is "mcode untouched AND the fork is patched correctly".
+#
+# In BOTH eras mcode's own installation must remain byte-identical to npm.
 set -uo pipefail
 
 QUOTA_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -14,6 +21,9 @@ FORK_BASE="${MCODE_QUOTA_FORK_DIR:-$HOME/.local/share/mcode-quota/mcode-clone}"
 SIDECAR="$QUOTA_DIR/sidecar/mcode-quota-fetcher-9f8a7b.mjs"
 PATCHES_DIR="$QUOTA_DIR/patches"
 LOADER="$PATCHES_DIR/_loader.mjs"
+CONFIG_YAML="${MCODE_CONFIG_YAML:-$HOME/.minimax/config.yaml}"
+STATUS_BIN="$QUOTA_DIR/mcodex-status"
+NATIVE_MIN="0.4.0"
 
 PASS=0
 FAIL=0
@@ -24,7 +34,9 @@ fail() { say "[FAIL]" "$1"; FAIL=$((FAIL+1)); }
 warn() { say "[warn]" "$1"; WARN=$((WARN+1)); }
 info() { say "[info]" "$1"; }
 
-# 1. mcode installed
+# ---------------------------------------------------------------------------
+# 1. mcode installed + strategy
+# ---------------------------------------------------------------------------
 CURRENT_FILE="$CODE_ROOT/current"
 if [[ -f "$CURRENT_FILE" ]]; then
   CURRENT_VERSION="$(tr -d '\r\n' < "$CURRENT_FILE")"
@@ -34,53 +46,28 @@ else
   echo; echo "  Fix: install mcode first, or set MCODE_CODE_ROOT."; exit 2
 fi
 
-# 1b. versioned patcher selection — visible which patches/<v>/ is in use
-if [[ -d "$PATCHES_DIR" ]]; then
-  AVAILABLE_PATCHES="$(find "$PATCHES_DIR" -maxdepth 1 -mindepth 1 -type d -printf '%f\n' 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tr '\n' ' ')"
-  if [[ -n "$AVAILABLE_PATCHES" ]]; then
-    ok "versioned patches available: $AVAILABLE_PATCHES"
-    # Resolve which one the loader would pick for the current mcode version.
-    CHOSEN="$(printf '%s\n' $AVAILABLE_PATCHES | awk -v cur="$CURRENT_VERSION" '
-      function cmp(a,b,  i,aa,bb) { split(a,aa,"."); split(b,bb,"."); for(i=1;i<=3;i++){if(aa[i]+0!=bb[i]+0) return aa[i]+0-bb[i]+0} return 0 }
-      BEGIN { best="" }
-      { if (cmp($0,cur) <= 0 && (best=="" || cmp($0,best) > 0)) best=$0 }
-      END { print best }')"
-    if [[ -n "$CHOSEN" ]]; then
-      if [[ "$CHOSEN" == "$CURRENT_VERSION" ]]; then
-        ok "loader picks patches/$CHOSEN/ (exact match)"
-      else
-        warn "loader will pick patches/$CHOSEN/ (closest <= for mcode $CURRENT_VERSION)"
-      fi
-    else
-      fail "no patches/<v>/ with v <= $CURRENT_VERSION; available: $AVAILABLE_PATCHES"
-    fi
-  else
-    fail "patches/ has no versioned subdirectories (expected patches/<x.y.z>/)"
-  fi
-  if [[ -f "$LOADER" ]]; then
-    ok "loader present: patches/_loader.mjs"
-  else
-    fail "loader missing: $LOADER"
-  fi
-else
-  fail "patches/ directory missing: $PATCHES_DIR"
+IS_NATIVE=0
+if [[ "$(printf '%s\n%s\n' "$NATIVE_MIN" "$CURRENT_VERSION" | sort -V | head -n1)" == "$NATIVE_MIN" ]]; then
+  IS_NATIVE=1
 fi
 
 SRC_CODE="$CODE_ROOT/releases/$CURRENT_VERSION/lib/node_modules/@minimax-ai/code"
 SRC_LAUNCHER="$(ls "$SRC_CODE"/chunks/launcher-*.js 2>/dev/null | head -1 || true)"
-FORK_CODE="$FORK_BASE/$CURRENT_VERSION/code"
-FORK_LAUNCHER="$(ls "$FORK_CODE"/chunks/launcher-*.js 2>/dev/null | head -1 || true)"
 
-# 2. mcode itself must be pristine
+# ---------------------------------------------------------------------------
+# 2. mcode itself must be pristine (both eras)
+# ---------------------------------------------------------------------------
 if [[ -n "$SRC_LAUNCHER" && -f "$SRC_LAUNCHER" ]]; then
   if grep -q "__mcodeQuota\|__mcodeRuntime" "$SRC_LAUNCHER"; then
-    fail "mcode launcher is PATCHED — mcode must stay pristine! Run: git checkout / reinstall mcode"
+    fail "mcode launcher is PATCHED — mcode must stay pristine! Reinstall mcode."
   else
     ok "mcode launcher pristine (no quota hooks)"
   fi
   PRISTINE_DIR="$FORK_BASE/.pristine-$CURRENT_VERSION"
-  if [[ -f "$PRISTINE_DIR/chunks/$(basename "$SRC_LAUNCHER")" ]]; then
-    if cmp -s "$SRC_LAUNCHER" "$PRISTINE_DIR/chunks/$(basename "$SRC_LAUNCHER")"; then
+  PRISTINE_LAUNCHER="$PRISTINE_DIR/chunks/$(basename "$SRC_LAUNCHER")"
+  [[ -f "$PRISTINE_LAUNCHER" ]] || PRISTINE_LAUNCHER="$PRISTINE_DIR/code/chunks/$(basename "$SRC_LAUNCHER")"
+  if [[ -f "$PRISTINE_LAUNCHER" ]]; then
+    if cmp -s "$SRC_LAUNCHER" "$PRISTINE_LAUNCHER"; then
       ok "mcode launcher byte-identical to pristine npm tarball"
     else
       fail "mcode launcher differs from pristine npm tarball"
@@ -92,156 +79,269 @@ else
   fail "mcode launcher not found in $SRC_CODE/chunks"
 fi
 
-# 3. fork exists and matches the installed version
-if [[ -f "$FORK_BASE/$CURRENT_VERSION/.fork-marker" ]]; then
-  ok "fork marker: $FORK_BASE/$CURRENT_VERSION"
-else
-  warn "fork not initialized yet — run: mcodex (it builds the fork on first launch)"
-fi
+if [[ "$IS_NATIVE" == "1" ]]; then
+  # -------------------------------------------------------------------------
+  # NATIVE PATH (mcode >= 0.4.0): config points at a working script.
+  # -------------------------------------------------------------------------
+  ok "strategy: native custom-command (no fork, no patching)"
 
-# 4. fork launcher patched
-if [[ -n "$FORK_LAUNCHER" && -f "$FORK_LAUNCHER" ]]; then
-  if grep -q "__mcodeQuotaRender" "$FORK_LAUNCHER"; then
-    ok "fork launcher render hook present"
+  if [[ -f "$CONFIG_YAML" ]]; then
+    ok "config present: $CONFIG_YAML"
   else
-    fail "fork launcher render hook missing — re-run: mcodex"
+    fail "config missing: $CONFIG_YAML — run: mcodex install"
+  fi
+
+  if grep -q "custom-command" "$CONFIG_YAML" 2>/dev/null; then
+    ok "statusLine includes custom-command"
+  else
+    fail "statusLine lacks custom-command — run: mcodex install"
+  fi
+
+  if grep -q "customStatusLine:" "$CONFIG_YAML" 2>/dev/null; then
+    CMD_LINE="$(grep -A3 "customStatusLine:" "$CONFIG_YAML" | grep -m1 "command:" | sed 's/.*command:[[:space:]]*//' | tr -d '"'"'"'')"
+    if [[ -n "$CMD_LINE" && -x "$CMD_LINE" ]]; then
+      ok "customStatusLine.command executable: $CMD_LINE"
+    elif [[ -n "$CMD_LINE" ]]; then
+      fail "customStatusLine.command not executable: $CMD_LINE"
+    else
+      fail "customStatusLine has no command: — run: mcodex install"
+    fi
+    if grep -qE "maxLines:[[:space:]]*3" "$CONFIG_YAML" 2>/dev/null; then
+      ok "maxLines = 3 (matches the 3-row layout)"
+    else
+      warn "maxLines is not 3; rows may be clipped"
+    fi
+    if grep -qE "colorMode:[[:space:]]*ansi" "$CONFIG_YAML" 2>/dev/null; then
+      ok "colorMode = ansi (24-bit colours preserved)"
+    else
+      warn "colorMode is not ansi; mcode will strip our colours"
+    fi
+  else
+    fail "customStatusLine block missing — run: mcodex install"
+  fi
+
+  if [[ -x "$STATUS_BIN" ]]; then
+    ok "mcodex-status executable: $STATUS_BIN"
+  else
+    fail "mcodex-status missing or not executable: $STATUS_BIN"
+  fi
+
+  # Live run: feed a synthetic payload exactly like mcode does, then check the
+  # three-row contract on both a wide and a narrow width.
+  TEST_SID="$(node --input-type=module -e '
+    try {
+      const { DatabaseSync } = await import("node:sqlite");
+      const db = new DatabaseSync(process.env.HOME + "/.minimax/v2/sqlite/runtime-state.sqlite", { readOnly: true });
+      const r = db.prepare("SELECT session_id FROM local_runtime_token_usage ORDER BY ts DESC LIMIT 1").get();
+      process.stdout.write(r ? r.session_id : "");
+    } catch { process.stdout.write(""); }
+  ' 2>/dev/null)"
+
+  if [[ -n "$TEST_SID" ]]; then
+    LIVE="$(printf '{"protocol":1,"event":"interval","session_id":"%s","workspace_dir":"%s","model":"-","tui_version":"%s"}\n' \
+      "$TEST_SID" "$QUOTA_DIR" "$CURRENT_VERSION" \
+      | COLUMNS=200 "$STATUS_BIN" 2>/dev/null || true)"
+    CLEAN="$(printf '%s' "$LIVE" | sed -E 's/\x1b\[[0-9;]*[A-Za-z]//g')"
+    if printf '%s' "$CLEAN" | grep -q "小时会话窗口" && printf '%s' "$CLEAN" | grep -q "周限制使用量"; then
+      ok "live render: $(printf '%s' "$CLEAN" | head -1 | cut -c1-100)"
+    else
+      warn "live render produced no quota row (mmx may be down). Raw: $(printf '%s' "$CLEAN" | head -c120)"
+    fi
+    if printf '%s' "$CLEAN" | grep -qE "今日 「[^」]+」 [0-9.]+[KMBT]"; then
+      ok "today-by-model: $(printf '%s' "$CLEAN" | grep -oE '今日 「[^」]+」 [0-9.]+[KMBT]' | head -1 | cut -c1-50)"
+    else
+      info "today row has no model data yet (no usage recorded today)"
+    fi
+    if printf '%s' "$CLEAN" | grep -q "│"; then
+      ok "separator is │ (U+2502)"
+    else
+      warn "separator is not │"
+    fi
+    ROWS="$(printf '%s\n' "$CLEAN" | grep -cE "会话 tokens|小时会话窗口|今日 ")"
+    if [[ "$ROWS" -ge 3 ]]; then
+      ok "section contract: 3 rows emitted (4-chunk + 5h/周 + 今日)"
+    else
+      warn "section contract: expected 3 rows, got $ROWS"
+    fi
+  else
+    warn "no session in sqlite to exercise the live render"
+  fi
+
+  # The renderer must stay identical to the legacy fork's.
+  if [[ -f "$QUOTA_DIR/tests/parity.mjs" && -f "$SIDECAR" ]]; then
+    if PARITY_OUT="$(cd "$QUOTA_DIR" && node tests/parity.mjs 2>&1)"; then
+      ok "parity with legacy fork renderer: $(printf '%s' "$PARITY_OUT" | tail -1)"
+    else
+      warn "parity test failed — native and legacy renderers may have diverged"
+    fi
+  else
+    info "parity test skipped (sidecar/test missing)"
   fi
 else
-  warn "fork launcher not built yet"
-fi
+  # -------------------------------------------------------------------------
+  # LEGACY PATH (mcode < 0.4.0): fork patch checks.
+  # -------------------------------------------------------------------------
+  ok "strategy: legacy fork patch (< $NATIVE_MIN has no custom-command item)"
 
-# 5. fork cli.js imports the sidecar (no NODE_OPTIONS)
-if [[ -f "$FORK_CODE/cli.js" ]]; then
-  if grep -q "mcode-quota-sidecar" "$FORK_CODE/cli.js"; then
-    ok "fork cli.js imports sidecar statically"
+  if [[ -d "$PATCHES_DIR" ]]; then
+    AVAILABLE_PATCHES="$(find "$PATCHES_DIR" -maxdepth 1 -mindepth 1 -type d -printf '%f\n' 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tr '\n' ' ')"
+    if [[ -n "$AVAILABLE_PATCHES" ]]; then
+      ok "versioned patches available: $AVAILABLE_PATCHES"
+      CHOSEN="$(printf '%s\n' $AVAILABLE_PATCHES | awk -v cur="$CURRENT_VERSION" '
+        function cmp(a,b,  i,aa,bb) { split(a,aa,"."); split(b,bb,"."); for(i=1;i<=3;i++){if(aa[i]+0!=bb[i]+0) return aa[i]+0-bb[i]+0} return 0 }
+        BEGIN { best="" }
+        { if (cmp($0,cur) <= 0 && (best=="" || cmp($0,best) > 0)) best=$0 }
+        END { print best }')"
+      if [[ -n "$CHOSEN" ]]; then
+        if [[ "$CHOSEN" == "$CURRENT_VERSION" ]]; then
+          ok "loader picks patches/$CHOSEN/ (exact match)"
+        else
+          warn "loader will pick patches/$CHOSEN/ (closest <= for mcode $CURRENT_VERSION)"
+        fi
+      else
+        fail "no patches/<v>/ with v <= $CURRENT_VERSION; available: $AVAILABLE_PATCHES"
+      fi
+    else
+      fail "patches/ has no versioned subdirectories (expected patches/<x.y.z>/)"
+    fi
+    if [[ -f "$LOADER" ]]; then
+      ok "loader present: patches/_loader.mjs"
+    else
+      fail "loader missing: $LOADER"
+    fi
   else
-    fail "fork cli.js does not import the sidecar — re-run: mcodex"
+    fail "patches/ directory missing: $PATCHES_DIR"
   fi
-else
-  warn "fork cli.js not built yet"
-fi
 
-# 6. sidecar present + syntax valid
-if [[ -f "$SIDECAR" ]]; then
-  if node --check "$SIDECAR" >/dev/null 2>&1; then
-    ok "sidecar present + syntax ok: $SIDECAR"
+  FORK_CODE="$FORK_BASE/$CURRENT_VERSION/code"
+  FORK_LAUNCHER="$(ls "$FORK_CODE"/chunks/launcher-*.js 2>/dev/null | head -1 || true)"
+
+  if [[ -f "$FORK_BASE/$CURRENT_VERSION/.fork-marker" ]]; then
+    ok "fork marker: $FORK_BASE/$CURRENT_VERSION"
   else
-    fail "sidecar failed node --check: $SIDECAR"
+    warn "fork not initialized yet — run: mcodex (it builds the fork on first launch)"
   fi
-else
-  fail "sidecar missing: $SIDECAR — run: mcodex"
-fi
 
-# 7. no NODE_OPTIONS leakage (the old storm root cause)
-if grep -qE '^[[:space:]]*(export[[:space:]]+)?NODE_OPTIONS=' "$QUOTA_DIR/mcodex"; then
-  fail "mcodex sets NODE_OPTIONS — this leaks the sidecar into child processes (storm risk)"
-else
-  ok "mcodex does not use NODE_OPTIONS"
-fi
-
-# 8. live render test (no mcode needed)
-if [[ -f "$SIDECAR" ]]; then
-  LIVE="$(
-    SIDECAR="$SIDECAR" node --input-type=module -e '
-      const sid = process.env.MCODE_QUOTA_TEST_SESSION || await (async () => {
-        try {
-          const { DatabaseSync } = await import("node:sqlite");
-          const db = new DatabaseSync(process.env.HOME + "/.minimax/v2/sqlite/runtime-state.sqlite", { readOnly: true });
-          const row = db.prepare("SELECT session_id FROM local_runtime_token_usage ORDER BY ts DESC LIMIT 1").get();
-          return row ? row.session_id : "";
-        } catch { return ""; }
-      })();
-      await import(process.env.SIDECAR);
-      globalThis.__mcodeShellState = {
-        agentSessionId: sid,
-        contextUsage: { usedTokens: 42000, contextWindowTokens: 200000 },
-      };
-      globalThis.__mcodeQuotaRender(200);
-      await new Promise((r) => setTimeout(r, 6000));
-      // Wide: the breakdown should be there. Narrow: it should be gone to save
-      // room, while 上下文 survives. "@@@" separates the two captures.
-      process.stdout.write(
-        globalThis.__mcodeQuotaRender(200).join("\n") +
-        "\n@@@\n" +
-        globalThis.__mcodeQuotaRender(100).join("\n")
-      );
-    ' 2>/dev/null || echo "(live test failed)"
-  )"
-  CLEAN="$(printf '%s' "$LIVE" | sed -E 's/\x1b\[[0-9;]*[A-Za-z]//g')"
-  WIDE="${CLEAN%%@@@*}"
-  NARROW="${CLEAN##*@@@}"
-  if printf '%s' "$WIDE" | grep -q "小时会话窗口" && printf '%s' "$WIDE" | grep -q "周限制使用量"; then
-    ok "live render: $(printf '%s' "$WIDE" | head -1 | cut -c1-100)"
+  if [[ -n "$FORK_LAUNCHER" && -f "$FORK_LAUNCHER" ]]; then
+    if grep -q "__mcodeQuotaRender" "$FORK_LAUNCHER"; then
+      ok "fork launcher render hook present"
+    else
+      fail "fork launcher render hook missing — re-run: mcodex"
+    fi
   else
-    warn "live render produced no quota line (mmx may be down). Raw: $(printf '%s' "$CLEAN" | head -c120)"
+    warn "fork launcher not built yet"
   fi
-  if printf '%s' "$CLEAN" | grep -q "今日"; then
+
+  if [[ -f "$FORK_CODE/cli.js" ]]; then
+    if grep -q "mcode-quota-sidecar" "$FORK_CODE/cli.js"; then
+      ok "fork cli.js imports sidecar statically"
+    else
+      fail "fork cli.js does not import the sidecar — re-run: mcodex"
+    fi
+  else
+    warn "fork cli.js not built yet"
+  fi
+
+  if [[ -f "$SIDECAR" ]]; then
+    if node --check "$SIDECAR" >/dev/null 2>&1; then
+      ok "sidecar present + syntax ok: $SIDECAR"
+    else
+      fail "sidecar failed node --check: $SIDECAR"
+    fi
+  else
+    fail "sidecar missing: $SIDECAR — run: mcodex"
+  fi
+
+  if grep -qE '^[[:space:]]*(export[[:space:]]+)?NODE_OPTIONS=' "$QUOTA_DIR/mcodex"; then
+    fail "mcodex sets NODE_OPTIONS — leaks the sidecar into child processes (storm risk)"
+  else
+    ok "mcodex does not use NODE_OPTIONS"
+  fi
+
+  if [[ -f "$SIDECAR" ]]; then
+    LIVE="$(
+      SIDECAR="$SIDECAR" node --input-type=module -e '
+        const sid = process.env.MCODE_QUOTA_TEST_SESSION || await (async () => {
+          try {
+            const { DatabaseSync } = await import("node:sqlite");
+            const db = new DatabaseSync(process.env.HOME + "/.minimax/v2/sqlite/runtime-state.sqlite", { readOnly: true });
+            const row = db.prepare("SELECT session_id FROM local_runtime_token_usage ORDER BY ts DESC LIMIT 1").get();
+            return row ? row.session_id : "";
+          } catch { return ""; }
+        })();
+        await import(process.env.SIDECAR);
+        globalThis.__mcodeShellState = {
+          agentSessionId: sid,
+          contextUsage: { usedTokens: 42000, contextWindowTokens: 200000 },
+        };
+        globalThis.__mcodeQuotaRender(200);
+        await new Promise((r) => setTimeout(r, 6000));
+        process.stdout.write(
+          globalThis.__mcodeQuotaRender(200).join("\n") +
+          "\n@@@\n" +
+          globalThis.__mcodeQuotaRender(100).join("\n")
+        );
+      ' 2>/dev/null || echo "(live test failed)"
+    )"
+    CLEAN="$(printf '%s' "$LIVE" | sed -E 's/\x1b\[[0-9;]*[A-Za-z]//g')"
+    WIDE="${CLEAN%%@@@*}"
+    if printf '%s' "$WIDE" | grep -q "小时会话窗口" && printf '%s' "$WIDE" | grep -q "周限制使用量"; then
+      ok "live render: $(printf '%s' "$WIDE" | head -1 | cut -c1-100)"
+    else
+      warn "live render produced no quota line (mmx may be down). Raw: $(printf '%s' "$CLEAN" | head -c120)"
+    fi
     if printf '%s' "$CLEAN" | grep -qE "今日 「[^」]+」 [0-9.]+[KMBT]"; then
       ok "today-by-model: $(printf '%s' "$CLEAN" | grep -oE '今日 「[^」]+」 [0-9.]+[KMBT]' | head -1 | cut -c1-50)"
     else
       info "today row present but no model data yet (sqlite has no usage for today)"
     fi
-  else
-    warn "today row missing (expected 今日 「model」 X.XM)"
-  fi
-  if printf '%s' "$CLEAN" | grep -q "│"; then
-    ok "separator is │ (U+2502)"
-  else
-    warn "separator is not │"
-  fi
-  # Section contract (v3.2): three independent lines.
-  #   1) 4-chunk: 会话 tokens + 上下文 + 缓存命中 + 轮数
-  #   2) 5h/周: 小时会话窗口 + 周限制使用量
-  #   3) 今日: 今日 「model」 X.XM
-  # 4-chunk was removed in v3.2.0 first ship then restored after user feedback;
-  # today row is its own line (no longer merged into 5h/周). See DECISIONS D28.
-  if printf '%s' "$WIDE" | grep -q "小时会话窗口" && printf '%s' "$WIDE" | grep -q "周限制使用量"; then
-    ok "section contract: 5h/周 bars present (小时会话窗口 + 周限制使用量)"
-  else
-    warn "section contract violated: 5h/周 bars should be present"
-  fi
-  if printf '%s' "$WIDE" | grep -qE "会话 tokens"; then
-    ok "section contract: 4-chunk present (会话 tokens)"
-  else
-    warn "section contract violated: 4-chunk (会话 tokens) should be present"
-  fi
-  WIDE_LINES=$(printf '%s\n' "$WIDE" | grep -cE "会话 tokens|小时会话窗口|今日 ")
-  if [[ "$WIDE_LINES" -ge 3 ]]; then
-    ok "section contract: 3 lines painted (4-chunk + 5h/周 + 今日), got $WIDE_LINES"
-  else
-    warn "section contract violated: expected ≥3 lines, got $WIDE_LINES"
+    if printf '%s' "$CLEAN" | grep -q "│"; then
+      ok "separator is │ (U+2502)"
+    else
+      warn "separator is not │"
+    fi
+    ROWS="$(printf '%s\n' "$WIDE" | grep -cE "会话 tokens|小时会话窗口|今日 ")"
+    if [[ "$ROWS" -ge 3 ]]; then
+      ok "section contract: 3 rows emitted (got $ROWS)"
+    else
+      warn "section contract: expected ≥3 rows, got $ROWS"
+    fi
   fi
 fi
 
-# 9. mmx available + logged in
+# ---------------------------------------------------------------------------
+# 9. mmx available + logged in (both eras)
+# ---------------------------------------------------------------------------
 if command -v mmx >/dev/null 2>&1; then
   ok "mmx on PATH: $(command -v mmx)"
   AUTH="$(mmx auth status --output json 2>/dev/null | head -c 200 || true)"
-  if [[ -n "$AUTH" ]] && ! printf '%s' "$AUTH" | grep -qi "not.*sign\|login.*required\|not_logged"; then
+  if printf '%s' "$AUTH" | grep -qiE '"?(logged_?in|authenticated)"?[[:space:]]*:[[:space:]]*true|"status"[[:space:]]*:[[:space:]]*"ok"|"method"[[:space:]]*:[[:space:]]*"(api-key|oauth|token)"|"key"[[:space:]]*:[[:space:]]*"'; then
     ok "mmx appears logged in"
+  elif [[ -n "$AUTH" ]]; then
+    info "mmx auth status inconclusive: $(printf '%s' "$AUTH" | head -c 80)"
   else
-    warn "mmx may not be logged in — quota line will stay empty"
+    warn "mmx auth status unavailable (quota row may fall back to cached data)"
   fi
 else
-  warn "mmx not on PATH — quota line will stay empty"
+  warn "mmx not on PATH — the 5h/周 row will show cached data or placeholders"
 fi
 
-# 10. PATH entrypoint
-if [[ -x "$HOME/.minimax/bin/mcodex" ]]; then
+# 10. launcher shim present
+if [[ -f "$HOME/.minimax/bin/mcodex" ]]; then
   ok "PATH entry: ~/.minimax/bin/mcodex"
 else
-  warn "PATH entry missing: ~/.minimax/bin/mcodex (launch with $QUOTA_DIR/mcodex)"
+  info "~/.minimax/bin/mcodex not present (call $QUOTA_DIR/mcodex directly, or add it to PATH)"
 fi
 
-# 11. no stale mcodex/mmx processes from a previous storm
-STRAY_MMX="$(pgrep -fc 'mmx quota show' 2>/dev/null || true)"
-STRAY_MMX="${STRAY_MMX:-0}"
-if [[ "$STRAY_MMX" -gt 2 ]]; then
-  warn "$STRAY_MMX concurrent 'mmx quota show' processes — possible storm"
+# 11. no mmx process storm
+CONCURRENT="$(pgrep -fc '^mmx ' 2>/dev/null | head -1 | tr -dc '0-9')"
+CONCURRENT="${CONCURRENT:-0}"
+if [[ "${CONCURRENT:-0}" -gt 3 ]]; then
+  fail "mmx process storm detected (concurrent: $CONCURRENT)"
 else
-  ok "no mmx process storm (concurrent: $STRAY_MMX)"
+  ok "no mmx process storm (concurrent: ${CONCURRENT:-0})"
 fi
 
 echo
 echo "Result: $PASS ok, $WARN warnings, $FAIL failures"
-[[ $FAIL -eq 0 ]] && exit 0 || exit 1
+[[ "$FAIL" -eq 0 ]]

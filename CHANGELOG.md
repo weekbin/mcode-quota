@@ -2,6 +2,107 @@
 
 记录每次对工具集的修改。新条目加在最上面。
 
+## 2026-09-11 — v3.3.0：迁移到 mcode 0.4.0 原生 custom-command
+
+### 背景
+
+你把 mcode 升到 0.4.0 后补丁失效了。排查发现 0.4.0 把状态栏渲染**从 widget
+子类搬到了基类**：
+
+| 方法 | 0.4.0 实测调用次数 |
+|---|---|
+| `t1.render`（我们注入的钩子） | **0** |
+| `ba.render` | 2 |
+| `ba.renderViewport(w, h)` | **22** ← 真正的绘制路径 |
+
+我们往 `t1.render` 注入覆写 → 死代码。同时发现 0.4.0 新增了
+`/statusline` 命令和 `custom-command` 状态栏项 —— 一个**官方扩展点**，可以
+完全替代 fork 补丁。
+
+### 决策（D30）
+
+迁移到原生能力，但**显示内容与旧补丁逐字节一致**；老版本继续用 fork 补丁。
+
+| | 旧：私有 fork + 注入 | 新：原生 custom-command |
+|---|---|---|
+| 修改 mcode | 2 处注入 | **0 字节** |
+| 升级韧性 | 每次适配（0.3.11→0.4.0 刚断过） | 配置 API |
+| 磁盘 | ~118 MB/版本 | 0 |
+| 代码量 | finder+patcher+loader ≈ 2500 行 | 1 脚本 + 4 个 lib 模块 |
+| 刷新 | 进程内事件驱动 | 10s 下限 + 事件触发 |
+| 进程开销 | 无 | 每 10s 一个 ~30ms 短命进程 |
+
+### 版本分发
+
+`mcodex` 按 mcode 版本选策略：
+
+- **≥ 0.4.0（原生）**：把 `tui.statusLine` + `tui.customStatusLine` 合并进
+  `~/.minimax/config.yaml`，然后 exec 官方 mcode。**不再建 fork**。
+  配置见 `config/0.4.0/tui.statusline.yaml`。
+- **< 0.4.0（legacy）**：`patches/_loader.mjs` + 私有 pristine fork（原样保留）。
+
+新增子命令：`mcodex install` / `uninstall` / `status` / `doctor`。
+
+### 新文件
+
+- `mcodex-status` —— custom-command 目标脚本。读 stdin JSON 拿 session_id，
+  查 sqlite + mmx，输出 3 行。
+- `lib/render.mjs` —— 渲染核心（纯函数，无 I/O）。新旧两条路径共用。
+- `lib/data.mjs` —— 数据层：会话 SUM、上下文、今日按模型、mmx 缓存。
+- `lib/config-apply.mjs` —— 文本级合并 config.yaml（保留注释与格式，幂等，
+  带一次性备份，install/uninstall 往返字节级一致）。
+
+### 数据源修正（D31）：上下文窗口
+
+原计划从 `config.yaml` 的 `providers.*.models.*.limit.context` 推导窗口，
+核查后发现那是**静态声明值**（MiniMax-M3 写 512000），而实际生效窗口是
+**1000000**（你已切到 1M 选项）。按 config 推导会显示 82% 而非真实的 42%。
+
+改用 sqlite 里 assistant 行的 `context_usage.contextWindowTokens` +
+`usedTokens` —— mcode 当轮**实际解析**的值，逐行变化，且自动解决
+`contextWindowOptions` 二选一的歧义。
+
+交叉验证：新路径 `上下文 5%` 与 mcode 原生 `Context 95% left` 互为补数 ✓。
+
+### 严重 bug 修复（D31）：session tokens 从未求和
+
+移植 parity 测试时发现旧 sidecar 的 session SQL 有真实缺陷：
+
+```sql
+SELECT COALESCE(input_tokens,0) AS inputTokens, ... COUNT(DISTINCT turn_id) AS turns
+FROM local_runtime_token_usage WHERE session_id = ?
+```
+
+裸列 + 聚合函数 → SQLite 把它当聚合查询，**裸列返回任意一行的值**。所以
+"会话 tokens" 一直显示的是**某一轮**的 token，不是会话总和：
+
+| 本机某 session | 旧（裸列） | 正确（SUM） |
+|---|---|---|
+| input | 21,484 | 7,997,785 |
+| cache | 3,344 | 623,706,505 |
+
+日常看不出来是因为 runtime API 优先且它返回正确值；一旦走到 sqlite 兜底
+（doctor、无 runtime 的环境）就暴露。
+
+**这正是新架构必须修的**：custom-command 是子进程，拿不到 runtime，
+只能走 sqlite。已给 0.3.10/0.3.11 patcher 的 sidecar 也补上 SUM。
+
+### 测试
+
+- **`tests/parity.mjs`（新）**：把同一组合成输入喂给旧 sidecar 与新 lib，
+  在 18 个宽度上逐字节比对。**它当场抓出了我移植时的一个真实错误**
+  （`MIN_BAR_WIDTH` 写成 4，实际是 8 —— `buildBar` 会把 bar 宽度向上
+  clamp 到该下限，导致窄屏布局分支选错）。19/19 通过。
+- `tests/mcode-smoke.mjs` 66 → **87**：新增原生路径段（config 合并幂等性、
+  可逆性、tui: 以上内容不变、备份、脚本契约、3 行契约、1M 窗口渲染）。
+- `mcode-quota-doctor` 重写为双路径，18/0/0。
+- 真实 TUI：跑**官方 `bin/mcode`**（不经过 mcodex、零补丁）确认 3 行正常。
+
+### 清理
+
+删掉 `patches/0.4.0/`（0.4.0 不再需要 fork）与 0.4.0 fork/pristine/tarball，
+释放 ~118 MB。
+
 ## 2026-09-10 — v3.2.4：逻辑自检 —— 一个 P0 + SQL 性能重做
 
 对补丁策略与 SQL 做了一轮系统排查，发现并修复 4 个问题，其中 1 个会

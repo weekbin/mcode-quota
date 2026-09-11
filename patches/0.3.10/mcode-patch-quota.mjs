@@ -798,7 +798,13 @@ const buildSessionSql = (cols) => {
   // NOTE: this file is itself wrapped in an outer template literal, so any
   // inner template literals (backticks) would be misinterpreted. Use plain
   // string concatenation everywhere inside this function.
-  const c = (name, def) => "COALESCE(" + name + ", " + def + ")";
+  // SUM, not a bare column. SQLite treats "bare column + aggregate" as an
+  // aggregate query and yields ONE ARBITRARY ROW's value for the bare
+  // column — so the pre-v3.3 form reported a single turn's tokens as the
+  // session total (measured: 21,484 instead of 7,997,785 input tokens on a
+  // real session). The runtime path masked this because it is preferred
+  // when available; the sqlite fallback and the doctor harness were wrong.
+  const c = (name, def) => "COALESCE(SUM(" + name + "), " + def + ")";
   const turns = cols.turnId
     ? "COUNT(DISTINCT " + cols.turnId + ") AS turns"
     : "0 AS turns";

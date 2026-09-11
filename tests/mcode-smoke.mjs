@@ -52,10 +52,27 @@ const discoverLiveLauncher = () => {
   try {
     const versions = readdirSync(base).filter((d) => /^\d+\.\d+\.\d+$/.test(d)).sort((a, b) => {
       const [a1,a2,a3] = a.split(".").map(Number), [b1,b2,b3] = b.split(".").map(Number);
-      return (b1-b1)||(b2-a2)||(b3-a3);
+      return (b1-a1)||(b2-a2)||(b3-a3);
     });
     for (const v of versions) { const p = tryRead(v); if (p) return p; }
   } catch {}
+  return null;
+};
+
+// The anchor finder only ever runs against a PRISTINE bundle — on a patched
+// one our appended wrapper is itself a `renderViewport` method at the very end
+// of the class body, which makes the method-end == body-end. So mutations and
+// finder checks must start from the pristine unpacked tarball, not the
+// already-patched fork.
+const discoverPristineLauncher = (version) => {
+  const base = `${process.env.HOME}/.local/share/mcode-quota/mcode-clone`;
+  const dirs = [`${base}/.pristine-${version}/chunks`, `${base}/.pristine-${version}/code/chunks`];
+  for (const dir of dirs) {
+    try {
+      const f = readdirSync(dir).find((x) => /^launcher-.*\.js$/.test(x));
+      if (f) return `${dir}/${f}`;
+    } catch {}
+  }
   return null;
 };
 
@@ -82,6 +99,7 @@ if (!existsSync(PATCH_DIR)) {
   console.error(`FATAL: no patches/${mcodeVersion}/ for the live launcher; run mcodex once to build it, or add the version.`);
   process.exit(2);
 }
+const PRISTINE_LAUNCHER = discoverPristineLauncher(mcodeVersion);
 
 const runFinder = (path) => {
   const out = execFileSync(process.execPath, [FINDER, path], { encoding: "utf-8" });
@@ -103,7 +121,11 @@ const runFinder = (path) => {
 const mkTempCopy = (label) => {
   const dir = mkdtempSync(join(tmpdir(), "mcode-smoke-"));
   const path = join(dir, "launcher-x.js");
-  copyFileSync(LIVE_LAUNCHER, path);
+  // Prefer the pristine bundle: the finder is a pristine-only tool and the
+  // fork copy is already patched. Fall back to the live launcher only when no
+  // pristine unpack is available (the finder will then report "already
+  // patched" clearly instead of failing obscurely).
+  copyFileSync(PRISTINE_LAUNCHER || LIVE_LAUNCHER, path);
   return { dir, path, label };
 };
 
@@ -120,67 +142,103 @@ const mutate = (path, transforms) => {
 };
 
 // ---- scenarios ----------------------------------------------------------
-const scenarios = [
-  {
-    name: "baseline: live launcher unchanged",
-    mutate: [],
-    expectWidget: "jf",
-    expectRuntime: "runtime",
-    expectShell: "shellState",
-  },
-  {
-    name: "mcode renames this.runtime -> this.engine",
-    mutate: [{ from: "this.runtime=i", to: "this.engine=i" }],
-    expectWidget: "jf",
-    expectRuntime: "engine",
-    expectShell: "shellState",
-  },
-  {
-    name: "mcode renames runtime + requestRender + statusLineItems",
-    mutate: [
-      { from: "this.runtime=i", to: "this.engine=i" },
-      { from: "this.requestRender=s", to: "this.repaint=s" },
-      { from: "this.statusLineItems=t.statusLineItems,", to: "this.bottomItems=t.statusLineItems," },
-    ],
-    expectWidget: "jf",
-    expectRuntime: "engine",
-    expectShell: "shellState",
-  },
-  {
-    name: "mcode swaps ctor param order: (t,i,s) -> (i,t,s)",
-    mutate: [
-      { from: "constructor(t,i,s){", to: "constructor(i,t,s){" },
-      { from: "super(t,i,s)", to: "super(i,t,s)" },
-      { from: "this.runtime=i", to: "this.runtime=t" },
-      { from: "this.statusLineItems=t.statusLineItems,", to: "this.statusLineItems=i.statusLineItems," },
-      { from: "this.shellState=t", to: "this.shellState=i" },
-    ],
-    expectWidget: "jf",
-    expectRuntime: "runtime",
-    expectShell: "shellState",
-  },
-  {
-    name: "mcode removes statusLineItems assignment",
-    mutate: [
-      { from: "this.statusLineItems=t.statusLineItems,", to: "" },
-    ],
-    expectWidget: "jf",
-    expectRuntime: "runtime",
-    expectShell: "shellState",
-  },
-  {
-    name: "mcode renames the ctor param from t -> ttx (cosmetic)",
-    mutate: [
-      { from: "constructor(t,i,s){", to: "constructor(ttx,i,s){" },
-      { from: "super(t,i,s)", to: "super(ttx,i,s)" },
-      { from: "this.shellState=t", to: "this.shellState=ttx" },
-      { from: "this.statusLineItems=t.statusLineItems,", to: "this.statusLineItems=ttx.statusLineItems," },
-    ],
-    expectWidget: "jf",
-    expectRuntime: "runtime",
-    expectShell: "shellState",
-  },
-];
+// Scenario tables are per-mcode-major because the injection model changed:
+//   0.3.x — the status widget (jf) inherits render(width); the wrapper is a
+//           render() override on the widget class. Expectations name the
+//           widget + its runtime/shellState fields.
+//   0.4.0 — painting moved to the BASE class (ba) as renderViewport(w, h);
+//           the widget (t1) is a controller and its render() is never called.
+//           The wrapper wraps the base class's renderViewport. Expectations
+//           name the viewport class + the fields discovered on the subclass.
+const SCENARIOS_BY_MAJOR = {
+  "0.3": [
+    {
+      name: "baseline: pristine launcher unchanged",
+      mutate: [],
+      expectWidget: "jf",
+      expectRuntime: "runtime",
+      expectShell: "shellState",
+    },
+    {
+      name: "mcode renames this.runtime -> this.engine",
+      mutate: [{ from: "this.runtime=i", to: "this.engine=i" }],
+      expectWidget: "jf",
+      expectRuntime: "engine",
+      expectShell: "shellState",
+    },
+    {
+      name: "mcode renames runtime + requestRender + statusLineItems",
+      mutate: [
+        { from: "this.runtime=i", to: "this.engine=i" },
+        { from: "this.requestRender=s", to: "this.repaint=s" },
+        { from: "this.statusLineItems=t.statusLineItems,", to: "this.bottomItems=t.statusLineItems," },
+      ],
+      expectWidget: "jf",
+      expectRuntime: "engine",
+      expectShell: "shellState",
+    },
+    {
+      name: "mcode removes statusLineItems assignment",
+      mutate: [
+        { from: "this.statusLineItems=t.statusLineItems,", to: "" },
+      ],
+      expectWidget: "jf",
+      expectRuntime: "runtime",
+      expectShell: "shellState",
+    },
+  ],
+  "0.4": [
+    {
+      name: "baseline: pristine launcher unchanged",
+      mutate: [],
+      expectWidget: "t1",
+      expectViewportClass: "ba",
+      expectRuntime: "runtime",
+      expectShell: "shellState",
+      expectState: "state",
+    },
+    {
+      name: "mcode renames this.runtime -> this.engine on the widget subclass",
+      mutate: [{ from: "this.runtime=i", to: "this.engine=i" }],
+      expectWidget: "t1",
+      expectViewportClass: "ba",
+      expectRuntime: "engine",
+      expectShell: "shellState",
+      expectState: "state",
+    },
+    {
+      name: "mcode renames runtime + requestRender on the widget subclass",
+      mutate: [
+        { from: "this.runtime=i", to: "this.engine=i" },
+        { from: "this.requestRender=s", to: "this.repaint=s" },
+      ],
+      expectWidget: "t1",
+      expectViewportClass: "ba",
+      expectRuntime: "engine",
+      expectShell: "shellState",
+      expectState: "state",
+    },
+    {
+      name: "mcode drops shellState from the subclass ctor (base .state still works)",
+      mutate: [
+        { from: "this.shellState=t,this.syncSources()", to: "this.syncSources()" },
+      ],
+      expectWidget: "t1",
+      expectViewportClass: "ba",
+      expectRuntime: "runtime",
+      expectShell: "",          // no longer discoverable on the subclass
+      expectState: "state",     // the base class's own field is the fallback
+    },
+  ],
+};
+
+const SCENARIOS = SCENARIOS_BY_MAJOR[mcodeVersion.split(".").slice(0, 2).join(".")];
+if (!SCENARIOS) {
+  console.error(`FATAL: no scenario table for mcode major '${mcodeVersion.split(".").slice(0,2).join(".")}'.`);
+  console.error(`  Add SCENARIOS_BY_MAJOR["<major>.<minor>"] in tests/mcode-smoke.mjs for this injection model.`);
+  process.exit(2);
+}
+const scenarios = SCENARIOS;
 
 const tempDirs = [];
 try {
@@ -201,8 +259,27 @@ try {
     check(kv.WIDGET === sc.expectWidget, `finder -> WIDGET=${sc.expectWidget}`, `got ${kv.WIDGET}`);
     check(kv.RUNTIME_PROP === sc.expectRuntime, `finder -> RUNTIME_PROP=${sc.expectRuntime}`, `got ${kv.RUNTIME_PROP}`);
     check(kv.SHELLSTATE_PROP === sc.expectShell, `finder -> SHELLSTATE_PROP=${sc.expectShell}`, `got ${kv.SHELLSTATE_PROP}`);
-    check(Number.isFinite(Number(kv.WIDGET_BODY_END)) && Number(kv.WIDGET_BODY_END) > 0, "finder -> WIDGET_BODY_END valid");
-    check(Number.isFinite(Number(kv.CTOR_END)) && Number(kv.CTOR_END) > 0, "finder -> CTOR_END valid");
+    if (sc.expectViewportClass) {
+      // 0.4.0 anchor set: the class that defines renderViewport plus its
+      // class-body / method offsets, all checked for ordering by the finder.
+      check(kv.VCLASS === sc.expectViewportClass,
+        `finder -> VCLASS=${sc.expectViewportClass}`, `got ${kv.VCLASS}`);
+      check(Number(kv.VCLASS_BODY_END) > Number(kv.VMETHOD_END) && Number(kv.VMETHOD_END) > Number(kv.VKEY_END),
+        "finder -> viewport offsets ordered (KEY < METHOD_END < BODY_END)");
+      // The wrapper needs a shell-state path from EITHER the subclass's own
+      // field or the base class's. Neither is hardcoded: the finder reports
+      // '' when it cannot discover a name, and the patcher then emits one
+      // fewer guarded clause instead of a literal guess.
+      if (sc.expectState !== undefined) {
+        check(kv.STATE_PROP === sc.expectState,
+          `finder -> STATE_PROP=${sc.expectState}`, `got ${kv.STATE_PROP}`);
+        check(!!(kv.SHELLSTATE_PROP || kv.STATE_PROP),
+          "finder -> a shell-state path is available (subclass or base)");
+      }
+    } else {
+      check(Number.isFinite(Number(kv.WIDGET_BODY_END)) && Number(kv.WIDGET_BODY_END) > 0, "finder -> WIDGET_BODY_END valid");
+      check(Number.isFinite(Number(kv.CTOR_END)) && Number(kv.CTOR_END) > 0, "finder -> CTOR_END valid");
+    }
   }
 
   // ---- patcher smoke: rebuild a fork and confirm the launcher is patched ----
@@ -320,7 +397,7 @@ try {
   console.log("\n[scenario] render hook is crash-contained");
   {
     const launchSrc = readFileSync(join(patched, launcher), "utf-8");
-    const hook = launchSrc.match(/__mcodeQuotaWidget=this;[\s\S]{0,400}?return r\}/);
+    const hook = launchSrc.match(/(?:__mcodeQuotaWidget=this;|__mcodeQuotaWidget=this\.)[\s\S]{0,700}?return (?:r|_r)\}/);
     check(!!hook, "render hook emitted in patched launcher");
     if (hook) {
       const h = hook[0];
@@ -365,6 +442,111 @@ try {
     check(/_fetchSessionOnceInner/.test(src), "inner body split so the flag is always cleared");
     check(/finally \{\s*if \(sessionFetchStartedAt === startedAt\) sessionFetchInFlight = false;/.test(src),
       "only the owning attempt clears the flag (a superseded one does not)");
+  }
+  // ---- native path (mcode >= 0.4.0) ----
+  // Above we exercised the legacy fork patcher against the newest available
+  // fork. From 0.4.0 onward mcodex stops patching entirely and drives mcode's
+  // own `custom-command` status item, so the things worth asserting change:
+  // the config merge is idempotent and reversible, and the status script
+  // answers a synthetic mcode payload with the 3-row contract.
+  console.log("\n[scenario] native custom-command path (mcode >= 0.4.0)");
+  {
+    const current = (() => {
+      try { return readFileSync(`${process.env.HOME}/.minimax-code/current`, "utf-8").trim(); }
+      catch { return null; }
+    })();
+    const isNative = !!current &&
+      ["0.4.0", current].sort((a, b) => {
+        const A = a.split(".").map(Number), B = b.split(".").map(Number);
+        return (A[0] - B[0]) || (A[1] - B[1]) || (A[2] - B[2]);
+      })[0] === "0.4.0";
+
+    if (!isNative) {
+      console.log(`  SKIP: mcode ${current} predates the native item`);
+    } else {
+      const { applyStatuslineConfig, removeStatuslineConfig } =
+        await import("../lib/config-apply.mjs");
+      const { buildStatusLines, stripAnsi } = await import("../lib/render.mjs");
+
+      // config merge: idempotent + reversible, on a copy of the real file
+      const realConfig = `${process.env.HOME}/.minimax/config.yaml`;
+      const work = mkdtempSync(join(tmpdir(), "mcodex-cfg-"));
+      const cfg = join(work, "config.yaml");
+      copyFileSync(realConfig, cfg);
+      const before = readFileSync(cfg, "utf-8");
+
+      const a1 = applyStatuslineConfig(cfg, { command: "/bin/true" });
+      const afterApply = readFileSync(cfg, "utf-8");
+      const a2 = applyStatuslineConfig(cfg, { command: "/bin/true" });
+      const afterSecond = readFileSync(cfg, "utf-8");
+      check(a1.changed === true, "apply reports changed on first run");
+      check(a2.changed === false, "apply is idempotent (second run reports no change)");
+      check(afterApply === afterSecond, "apply is byte-stable across runs");
+      check(afterApply.includes("custom-command"), "statusLine gained custom-command");
+      check(afterApply.includes("customStatusLine:"), "customStatusLine block written");
+      check(afterApply.includes("display: block") && afterApply.includes("maxLines: 3"),
+        "block mode + 3 lines configured");
+      check(afterApply.includes("colorMode: ansi"), "ansi colourMode configured");
+      // everything outside the tui: block must survive byte-for-byte
+      const headBefore = before.split("tui:")[0];
+      const headAfter = afterApply.split("tui:")[0];
+      check(headBefore === headAfter, "content above tui: is untouched");
+      check(existsSync(cfg + ".mcodex-backup"), "one-shot backup written");
+
+      const r1 = removeStatuslineConfig(cfg);
+      const afterRemove = readFileSync(cfg, "utf-8");
+      check(r1.changed === true, "remove reports changed");
+      check(!afterRemove.includes("customStatusLine:"), "customStatusLine removed");
+      check(!/^\s*-\s*custom-command\s*$/m.test(afterRemove), "custom-command removed from statusLine");
+      check(afterRemove.split("tui:")[0] === headBefore, "content above tui: still untouched");
+      rmSync(work, { recursive: true, force: true });
+
+      // status script: synthetic payload -> the 3-row contract
+      const statusBin = join(PROJECT_ROOT, "mcodex-status");
+      if (existsSync(statusBin)) {
+        const sid = (() => {
+          try {
+            const { execFileSync: ex } = require("node:child_process");
+            return "";
+          } catch { return ""; }
+        })();
+        const payload = JSON.stringify({
+          protocol: 1, event: "interval",
+          session_id: process.env.MCODEX_TEST_SESSION || "",
+          workspace_dir: PROJECT_ROOT, model: "-", tui_version: current,
+        });
+        const out = execFileSync(process.execPath, [statusBin], {
+          input: payload + "\n", encoding: "utf-8", env: { ...process.env, COLUMNS: "200" },
+        });
+        const rows = out.trim() ? out.trim().split("\n").length : 0;
+        // With no session id the script must stay silent rather than emit
+        // placeholder noise — that is the containment contract.
+        check(rows === 0 || rows === 3, `empty session -> ${rows} rows (expect 0)`);
+      }
+
+      // renderer unit contract (independent of any mcode install)
+      const st = {
+        quota: { valid: true, dRem: 55, dReset: "2h 6m", wRem: 97, wReset: "2d 11h" },
+        session: { valid: true, total: 644.88e6, input: 8.01e6, output: 1.41e6, cache: 635.45e6,
+                   turns: 97, cacheHit: 0.9875 },
+        context: { used: 425844, window: 1000000 },
+        today: { valid: true, items: [{ model: "MiniMax-M3", total: 170.19e6 }] },
+        placeholders: { session: false, context: false, today: false },
+        tailMode: "auto",
+      };
+      const lines200 = buildStatusLines(st, 200).map(stripAnsi);
+      check(lines200.length === 3, `wide render emits 3 rows (got ${lines200.length})`);
+      check(/^会话 tokens 644\.88M/.test(lines200[0]), "row 1 starts with 会话 tokens and 2-decimal totals");
+      check(lines200[0].includes("上下文 43% 「425.84K/1.00M」"),
+        "row 1 renders the live 1M context window, not config.yaml's 512K",
+        lines200[0].slice(0, 90));
+      check(lines200[1].includes("小时会话窗口") && lines200[1].includes("周限制使用量"),
+        "row 2 carries both quota bars");
+      check(lines200[2].includes("今日"), "row 3 carries the per-model totals");
+      const lines60 = buildStatusLines(st, 60).map(stripAnsi);
+      check(lines60.length >= 3, `narrow render still emits ≥3 rows (got ${lines60.length})`);
+      check(lines60.every((l) => stripAnsi(l).length <= 200), "narrow rows stay within budget-ish");
+    }
   }
 } finally {
   for (const d of tempDirs) { try { rmSync(d, { recursive: true, force: true }); } catch {} }

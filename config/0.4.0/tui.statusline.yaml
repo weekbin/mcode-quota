@@ -1,0 +1,52 @@
+# mcode 0.4.0+ —— 原生 custom-command 配置载荷
+#
+# mcodex 在 0.4.0 及以后**不再修改 mcode 任何字节**。它改为把下面这段写进
+# ~/.minimax/config.yaml，让 mcode 自己的 `custom-command` 状态栏项来跑我们的
+# 脚本。`mcodex install` 负责合并（文本级编辑，保留文件其余部分与注释）。
+#
+# 与原 fork 补丁的对应关系：
+#   fork 注入  render() 覆写 -> 追加 3 行
+#   本配置     statusLine 里的 custom-command + customStatusLine
+#
+# 字段含义（均来自 mcode 0.4.0 的 launcher 实现）：
+#   command          可执行文件的 argv[0]（不是 shell；不支持管道/重定向）
+#   display: block   多行块模式（非 block 时只取第一行）
+#   position: below  块渲染在原生状态栏**下方**；above 则在上方
+#                    below => ["", ...原生项, ...我们的块]
+#   maxLines         1..5，默认 3
+#   intervalSeconds  最小 10；触发时机还有 startup / session-change / workspace-change
+#   timeoutMs        500..30000，默认 5000
+#   colorMode: ansi  原样保留 24-bit ANSI（否则 mcode 会剥掉颜色）
+#
+# 脚本收到的 stdin（一行 JSON）：
+#   {"protocol":1,"event":"interval","session_id":"mvs_…",
+#    "workspace_dir":"…","model":"MiniMax-M3","session_title":"…",
+#    "tui_version":"0.4.0"}
+# 其中 session_id 仅在会话激活时出现（startup 事件通常没有）。
+#
+# 输出：最多 maxLines 行到 stdout。空行会被丢弃，超宽行会被截断加 …。
+# stdout 上限 8 KB。
+
+tui:
+  statusLine:
+    - current-dir
+    - session-title
+    - git-branch
+    - review-link
+    - plan-mode
+    - approval-mode
+    - model-with-reasoning
+    - subagent
+    - token-quota
+    - context-remaining
+    - model
+    - cache-read-ratio
+    - custom-command          # <- mcodex 追加
+  customStatusLine:           # <- mcodex 整段写入
+    command: <repo>/mcodex-status
+    display: block
+    position: below
+    maxLines: 3
+    intervalSeconds: 10
+    timeoutMs: 5000
+    colorMode: ansi

@@ -1,7 +1,75 @@
-# Architecture — mcodex 隔离架构
+# Architecture — mcodex
 
-本文解释 mcodex 如何在不修改 mcode 本体的前提下，把配额 / token 行注入 TUI 状态栏。
-**「为什么选这个方案、否决了哪些」见 [DECISIONS.md](DECISIONS.md)**，本文只讲实现。
+## 0. 两条策略（按 mcode 版本分发）
+
+```
+                    mcodex [args]
+                          │
+              ┌───────────┴────────────┐
+      mcode >= 0.4.0            mcode < 0.4.0
+        （原生）                  （legacy）
+              │                        │
+   合并 config.yaml 的             patches/_loader.mjs
+   tui.statusLine +                ↓ 选 patches/<版本>/
+   tui.customStatusLine            patcher 建私有 pristine fork
+              │                        │
+   exec 官方 bin/mcode             exec fork 的 code/cli.js
+              │                        │
+   mcode 的 custom-command          fork 的 cli.js
+   每 10s / 切 session 跑              静态 import sidecar
+   mcodex-status                    （不走 NODE_OPTIONS）
+              │                        │
+              └───────────┬────────────┘
+                          ▼
+                lib/render.mjs（唯一渲染核心）
+                3 行：4-chunk / 5h-周 / 今日
+                          │
+              tests/parity.mjs 在 18 个宽度上
+              逐字节锁定两条路径输出一致
+```
+
+**不变约束**：mcode 本体 0 字节修改。
+
+- 原生路径：只写 mcode 自己的配置文件，mcode 二进制不动。
+- legacy 路径：fork 是 pristine npm tarball 的**副本**，patch 只落在副本里。
+
+---
+
+## 1. 原生路径（mcode >= 0.4.0）
+
+mcode 0.4.0 起状态栏渲染在基类 `ba.renderViewport(width, height)`，widget `t1`
+只是控制器（实测调用次数 0 vs 22，见 DECISIONS D30）。与其继续注入内部方法，
+不如用官方扩展点：
+
+1. `mcodex install` 把 `custom-command` 加进 `tui.statusLine`，并写入
+   `tui.customStatusLine`（`lib/config-apply.mjs` 做文本级合并，保留注释与排版，
+   幂等，install/uninstall 往返字节级一致）。
+2. mcode 在 startup / `session-change` / `workspace-change` / 每
+   `intervalSeconds`（最小 10）调用 `mcodex-status`，向 stdin 写一行 JSON。
+3. `mcodex-status` 取数（`lib/data.mjs`）→ 渲染（`lib/render.mjs`）→ 3 行到
+   stdout。mcode 渲染在原生状态栏下方（`position: below`）。
+
+**故障收敛**：脚本退出码非 0 或输出为空时 mcode 只是不显示块，不会影响 TUI。
+这与 legacy 路径在注入点包 try/catch 是同一个目标（D29.1）。
+
+## 2. legacy 路径（mcode < 0.4.0）
+
+原样保留：`patches/<版本>/` 目录 + `_loader.mjs` 按 `--current` 分发，AST 推导
+锚点（不锁类名/字段名），把 `render()` 覆写追加进 widget 类体，sidecar 由 fork 的
+`cli.js` 静态 import。
+
+## 3. 数据流（两条路径共用）
+
+| 数据 | 来源 | 备注 |
+|---|---|---|
+| session_id / model / 标题 | 原生：stdin JSON；legacy：`shellState` | |
+| 会话 tokens + 轮数 | sqlite SUM(`local_runtime_token_usage`) | **必须 SUM**，见 D31.1 |
+| 上下文 已用/窗口 | sqlite `context_usage.usedTokens` / `contextWindowTokens` | 实时值，非 config 声明值，见 D31.2 |
+| 缓存命中 | cache_read / (cache_read + input) | |
+| 今日 按模型 | message_rows(model) × token_usage 按 turn_id | 60s 文件缓存 |
+| 5h/周 | `mmx quota show` | 60s 文件缓存 |
+
+## 4. 排版
 
 ## 0. 总原则
 

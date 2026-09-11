@@ -1,82 +1,222 @@
 #!/usr/bin/env bash
-# mcodex — launch mcode with the quota status line, in a fully isolated fork.
+# mcodex — launch mcode with the quota/token status rows.
 #
-# DESIGN (why this is safe):
-#   * mcode's own installation is NEVER modified. We patch a private fork
-#     built from a pristine npm tarball of the exact installed version.
-#   * The sidecar is imported by the fork's cli.js (a static import), NOT via
-#     NODE_OPTIONS. NODE_OPTIONS would leak into every child process mcode
-#     spawns and was the root cause of the earlier process storm.
-#   * The sidecar does not auto-start; its pollers start on the first status
-#     line render, i.e. only in the real TUI process.
-#   * The patcher is dispatched through patches/_loader.mjs, which picks
-#     patches/<version>/mcode-patch-quota.mjs based on the installed mcode
-#     version. If the exact version is not present, the loader falls back
-#     to the closest patches/<v>/ with v <= current (see DECISIONS D27).
+# TWO ERA-SPECIFIC STRATEGIES, chosen by the installed mcode version:
+#
+#   mcode >= 0.4.0  — NATIVE. mcode grew a `custom-command` status-line item
+#                     that runs a command on startup / session change / an
+#                     interval and renders its stdout underneath the built-in
+#                     status row (see config/0.4.0/tui.statusline.yaml). We
+#                     write that config once and exec the stock mcode. No fork,
+#                     no patching, nothing modified.
+#
+#   mcode <  0.4.0  — LEGACY FORK. No such extension point exists there, so we
+#                     build a private pristine-tarball fork and inject a
+#                     render() override through patches/_loader.mjs. mcode's
+#                     own installation is still never touched.
+#
+# Both paths drive the same renderer (lib/render.mjs), and tests/parity.mjs
+# asserts their output is byte-identical.
 #
 # Usage:
-#   mcodex [mcode args...]
+#   mcodex [mcode args...]     ensure the status rows are installed, then launch
+#   mcodex install             install/refresh the config only, do not launch
+#   mcodex uninstall           remove the config entries
+#   mcodex status              report which strategy applies and whether it is set up
+#   mcodex doctor              run the self-check
 #
 # Env overrides:
-#   MCODE_QUOTA_FORK_DIR   fork + tarball cache root (default ~/.local/share/mcode-quota/mcode-clone)
-#   MCODE_CODE_ROOT        where mcode is installed (default ~/.minimax-code)
-#   MCODE_QUOTA_DEBUG=1    show patcher diagnostics on stderr
-#   MCODE_QUOTA_OFFLINE=1  never hit the network (use cached tarball / installed src)
+#   MCODE_QUOTA_FORK_DIR     fork + tarball cache root (legacy path only)
+#   MCODE_CODE_ROOT          where mcode is installed (default ~/.minimax-code)
+#   MCODE_QUOTA_DEBUG=1      show diagnostics on stderr
+#   MCODE_QUOTA_OFFLINE=1    legacy path: never hit the network
 
 set -euo pipefail
 
 QUOTA_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CODE_ROOT="${MCODE_CODE_ROOT:-${HOME}/.minimax-code}"
 FORK_BASE="${MCODE_QUOTA_FORK_DIR:-${HOME}/.local/share/mcode-quota/mcode-clone}"
+CONFIG_YAML="${MCODE_CONFIG_YAML:-${HOME}/.minimax/config.yaml}"
+STATUS_BIN="${QUOTA_DIR}/mcodex-status"
 
-CURRENT_POINTER="${CODE_ROOT}/current"
-if [[ ! -f "$CURRENT_POINTER" ]]; then
-  echo "mcodex: mcode current pointer not found: $CURRENT_POINTER" >&2
+NODE_BIN="$(command -v node || true)"
+if [[ -z "$NODE_BIN" ]]; then
+  echo "mcodex: node not found on PATH" >&2
   exit 1
 fi
-CURRENT_VERSION="$(tr -d '\r\n' < "$CURRENT_POINTER")"
+
+CURRENT_VERSION="$(cat "${CODE_ROOT}/current" 2>/dev/null | tr -d '[:space:]' || true)"
+if [[ -z "$CURRENT_VERSION" ]]; then
+  echo "mcodex: cannot determine mcode version (${CODE_ROOT}/current)" >&2
+  exit 1
+fi
+
+# 0.4.0 is the first version with the native custom-command status item.
+# sort -V gives a correct dotted-numeric compare (0.10.0 > 0.4.0, unlike sort).
+NATIVE_MIN="0.4.0"
+IS_NATIVE=0
+if [[ "$(printf '%s\n%s\n' "$NATIVE_MIN" "$CURRENT_VERSION" | sort -V | head -n1)" == "$NATIVE_MIN" ]]; then
+  IS_NATIVE=1
+fi
+
 SRC_RELEASE_DIR="${CODE_ROOT}/releases/${CURRENT_VERSION}"
-SRC_LAUNCHER_FILE="${SRC_RELEASE_DIR}/.mcode-launcher"
-
-if [[ ! -d "$SRC_RELEASE_DIR" ]]; then
-  echo "mcodex: mcode release not found: $SRC_RELEASE_DIR" >&2
-  exit 1
-fi
+SRC_LAUNCHER_FILE="${SRC_RELEASE_DIR}/bin/mcode"
+# Fall back to whatever the user's PATH resolves to if the release layout moved.
 if [[ ! -x "$SRC_LAUNCHER_FILE" ]]; then
-  echo "mcodex: mcode launcher not found: $SRC_LAUNCHER_FILE" >&2
-  exit 1
+  SRC_LAUNCHER_FILE="$(command -v mcode || true)"
 fi
 
-# Use the exact node binary mcode pins, so the fork runs on the same runtime.
-NODE_BIN="$(sed -n "s/^exec '\([^']*\)'.*/\1/p" "$SRC_LAUNCHER_FILE" | head -1)"
-if [[ -z "${NODE_BIN}" || ! -x "${NODE_BIN}" ]]; then
-  NODE_BIN="node"
-fi
+# ---------------------------------------------------------------------------
+# native path (mcode >= 0.4.0)
+# ---------------------------------------------------------------------------
+native_apply() {
+  local mode="${1:-apply}"
+  local out
+  if [[ "$mode" == "remove" ]]; then
+    out="$("$NODE_BIN" --input-type=module -e "
+      import { removeStatuslineConfig } from '${QUOTA_DIR}/lib/config-apply.mjs';
+      const r = removeStatuslineConfig('${CONFIG_YAML}');
+      console.log(JSON.stringify(r));
+    " 2>&1)" || { echo "mcodex: config edit failed: $out" >&2; return 1; }
+  else
+    out="$("$NODE_BIN" --input-type=module -e "
+      import { applyStatuslineConfig } from '${QUOTA_DIR}/lib/config-apply.mjs';
+      const r = applyStatuslineConfig('${CONFIG_YAML}', {
+        command: '${STATUS_BIN}',
+        maxLines: 3,
+        intervalSeconds: 10,
+        timeoutMs: 5000,
+        position: 'below',
+        colorMode: 'ansi',
+      });
+      console.log(JSON.stringify(r));
+    " 2>&1)" || { echo "mcodex: config edit failed: $out" >&2; return 1; }
+  fi
 
-SIDECAR="${QUOTA_DIR}/sidecar/mcode-quota-fetcher-9f8a7b.mjs"
+  local changed
+  changed="$("$NODE_BIN" -e "process.stdout.write(String(JSON.parse(process.argv[1]).changed))" "$out" 2>/dev/null || echo "?")"
+  if [[ "$changed" == "true" ]]; then
+    echo "mcodex: config updated (${CONFIG_YAML})"
+  fi
+  if [[ "${MCODE_QUOTA_DEBUG:-0}" == "1" ]]; then
+    echo "mcodex: config apply -> $out" >&2
+  fi
+  return 0
+}
 
-PATCH_ARGS=(--src="$SRC_RELEASE_DIR" --fork-base="$FORK_BASE"
-            --sidecar="$SIDECAR" --current="$CURRENT_VERSION")
-if [[ "${MCODE_QUOTA_OFFLINE:-0}" == "1" ]]; then
-  PATCH_ARGS+=(--offline)
-fi
+native_status() {
+  local applied="no"
+  if [[ -f "$CONFIG_YAML" ]] && grep -q "customStatusLine:" "$CONFIG_YAML" 2>/dev/null \
+     && grep -q "custom-command" "$CONFIG_YAML" 2>/dev/null; then
+    applied="yes"
+  fi
+  echo "mcodex status"
+  echo "  mcode version   : ${CURRENT_VERSION}"
+  echo "  strategy        : native custom-command (no fork, no patching)"
+  echo "  config          : ${CONFIG_YAML}"
+  echo "  config applied  : ${applied}"
+  echo "  status command  : ${STATUS_BIN}"
+  echo "  note            : plain 'mcode' shows the rows too — mcodex is not required at runtime"
+}
 
-PATCH_ERR=""
-# Dispatch through patches/_loader.mjs — it picks patches/<version>/ based
-# on --current, falling back to the closest available <= requested.
-if ! PATCH_ERR="$("$NODE_BIN" "$QUOTA_DIR/patches/_loader.mjs" "${PATCH_ARGS[@]}" 2>&1 1>/dev/null)"; then
-  echo "mcodex: quota patcher failed — launching plain mcode" >&2
-  echo "$PATCH_ERR" >&2
+# ---------------------------------------------------------------------------
+# legacy path (mcode < 0.4.0)
+# ---------------------------------------------------------------------------
+legacy_launch() {
+  local SIDECAR="${QUOTA_DIR}/sidecar/mcode-quota-fetcher-9f8a7b.mjs"
+  local PATCH_ARGS=(--src="$SRC_RELEASE_DIR" --fork-base="$FORK_BASE"
+                    --sidecar="$SIDECAR" --current="$CURRENT_VERSION")
+  if [[ "${MCODE_QUOTA_OFFLINE:-0}" == "1" ]]; then
+    PATCH_ARGS+=(--offline)
+  fi
+
+  local PATCH_ERR=""
+  if ! PATCH_ERR="$("$NODE_BIN" "$QUOTA_DIR/patches/_loader.mjs" "${PATCH_ARGS[@]}" 2>&1 1>/dev/null)"; then
+    echo "mcodex: quota patcher failed — launching plain mcode" >&2
+    echo "$PATCH_ERR" >&2
+    exec "$SRC_LAUNCHER_FILE" "$@"
+  fi
+  if [[ "${MCODE_QUOTA_DEBUG:-0}" == "1" && -n "$PATCH_ERR" ]]; then
+    echo "$PATCH_ERR" >&2
+  fi
+
+  local CLI_JS="${FORK_BASE}/${CURRENT_VERSION}/code/cli.js"
+  if [[ ! -f "$CLI_JS" ]]; then
+    echo "mcodex: fork CLI not found: $CLI_JS — launching plain mcode" >&2
+    exec "$SRC_LAUNCHER_FILE" "$@"
+  fi
+  exec "$NODE_BIN" "$CLI_JS" "$@"
+}
+
+legacy_status() {
+  echo "mcodex status"
+  echo "  mcode version   : ${CURRENT_VERSION}"
+  echo "  strategy        : legacy fork patch (< ${NATIVE_MIN} has no custom-command)"
+  echo "  fork base       : ${FORK_BASE}"
+  echo "  sidecar         : ${QUOTA_DIR}/sidecar/mcode-quota-fetcher-9f8a7b.mjs"
+  if [[ -f "${FORK_BASE}/${CURRENT_VERSION}/code/cli.js" ]]; then
+    echo "  fork built      : yes"
+  else
+    echo "  fork built      : no (will be built on first launch)"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# dispatch
+# ---------------------------------------------------------------------------
+if [[ "$IS_NATIVE" == "1" ]]; then
+  case "${1:-}" in
+    install)
+      native_apply apply
+      native_status
+      exit 0
+      ;;
+    uninstall)
+      native_apply remove
+      echo "mcodex: status rows removed from ${CONFIG_YAML}"
+      exit 0
+      ;;
+    status)
+      native_status
+      exit 0
+      ;;
+    doctor)
+      exec "${QUOTA_DIR}/mcode-quota-doctor" "${@:2}"
+      ;;
+  esac
+
+  # Ensure the config is in place before launching. Cheap (one file read) and
+  # self-healing if mcode rewrites config.yaml.
+  native_apply apply || true
+
+  if [[ ! -x "$STATUS_BIN" ]]; then
+    echo "mcodex: WARNING ${STATUS_BIN} is not executable; the status block will be empty" >&2
+  fi
+
+  if [[ -z "$SRC_LAUNCHER_FILE" ]]; then
+    echo "mcodex: cannot find the mcode launcher for ${CURRENT_VERSION}" >&2
+    exit 1
+  fi
   exec "$SRC_LAUNCHER_FILE" "$@"
 fi
-if [[ "${MCODE_QUOTA_DEBUG:-0}" == "1" && -n "$PATCH_ERR" ]]; then
-  echo "$PATCH_ERR" >&2
-fi
 
-CLI_JS="${FORK_BASE}/${CURRENT_VERSION}/code/cli.js"
-if [[ ! -f "$CLI_JS" ]]; then
-  echo "mcodex: fork CLI not found: $CLI_JS — launching plain mcode" >&2
-  exec "$SRC_LAUNCHER_FILE" "$@"
-fi
+case "${1:-}" in
+  install)
+    echo "mcodex: mcode ${CURRENT_VERSION} predates the native custom-command item;"
+    echo "        nothing to install — the fork patch is applied on launch."
+    exit 0
+    ;;
+  uninstall)
+    echo "mcodex: nothing to uninstall on the legacy path (the fork is separate from mcode)."
+    exit 0
+    ;;
+  status)
+    legacy_status
+    exit 0
+    ;;
+  doctor)
+    exec "${QUOTA_DIR}/mcode-quota-doctor" "${@:2}"
+    ;;
+esac
 
-exec "$NODE_BIN" "$CLI_JS" "$@"
+legacy_launch "$@"

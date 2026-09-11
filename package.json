@@ -1,10 +1,11 @@
 {
   "name": "mcode-quota",
-  "version": "3.2.0",
+  "version": "3.3.0",
   "description": "mcodex — fork-isolated quota + session token status bar for mcode",
   "type": "module",
   "bin": {
     "mcodex": "./mcodex",
+    "mcodex-status": "./mcodex-status",
     "mcode-quota-doctor": "./mcode-quota-doctor"
   },
   "scripts": {
