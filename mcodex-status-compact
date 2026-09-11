@@ -1,0 +1,141 @@
+#!/usr/bin/env node
+// mcodex-status-compact — 1-line, narrow-screen variant of mcodex-status.
+//
+// v2: now measures the actual terminal width itself (via tput cols / TIOCGWINSZ)
+// and degrades the line before it ever reaches mcode, so mcode's own
+// visual-width ellipsis (E() with \u2026) does NOT clip our content to "…".
+//
+//   ≥ 50 cols : "{ws} │ {model} │ {title-trimmed}"
+//   30–49     : "{ws} │ {model}"
+//   18–29     : "{ws}"   (workspace basename only)
+//   < 18      : nothing
+//
+// std json still arrives on stdin (workspace_dir, model, session_title).
+// No DB access, no subprocesses. On any problem, exit 0 with no output.
+
+import { execSync } from "node:child_process";
+
+function readStdin() {
+  return new Promise((resolve) => {
+    let buf = "";
+    let done = false;
+    const finish = () => { if (!done) { done = true; resolve(buf); } };
+    if (process.stdin.isTTY) { finish(); return; }
+    process.stdin.setEncoding("utf-8");
+    process.stdin.on("data", (c) => {
+      buf += c;
+      if (buf.includes("\n")) { try { process.stdin.pause(); } catch {} finish(); }
+    });
+    process.stdin.on("end", finish);
+    process.stdin.on("error", finish);
+    setTimeout(finish, 1000).unref?.();
+  });
+}
+
+// terminal width probe — prefers tput (queries TIOCGWINSZ, no env roundtrip).
+// falls back to COLUMNS env, then stdout.columns, then 80.
+function probeWidth() {
+  try {
+    const out = execSync("tput cols 2>/dev/null", { encoding: "utf-8", timeout: 200, stdio: ["ignore", "pipe", "ignore"] }).trim();
+    const n = Number(out);
+    if (Number.isFinite(n) && n > 0) return n;
+  } catch {}
+  const env = Number(process.env.COLUMNS);
+  if (Number.isFinite(env) && env > 0) return env;
+  const t = Number(process.stdout.columns);
+  if (Number.isFinite(t) && t > 0) return t;
+  return 80;
+}
+
+// grapheme-cluster length so we never cut mid-codepoint.
+function gLen(s) { return Array.from(s || "").length; }
+function gSlice(s, n) { return Array.from(s || "").slice(0, Math.max(0, n)).join(""); }
+
+// strip ANSI escapes for measurement (mcode may pass titles with \x1B[...m).
+const ANSI = /\x1B\[[0-9;?]*[A-Za-z]/g;
+function strip(s) { return (s || "").replace(ANSI, ""); }
+
+// visual width of a string: ASCII 1, others 2 (rough but good enough for the
+// title truncation budget — mcode itself will do the final pixel-perfect
+// ellipsis on whatever we emit, but at the lengths we choose below that
+// ellipsis never fires).
+function vw(s) {
+  let n = 0;
+  for (const ch of s || "") {
+    const c = ch.codePointAt(0);
+    n += c < 0x80 ? 1 : 2;
+  }
+  return n;
+}
+
+function basename(p) {
+  if (!p) return "";
+  return p.replace(/\/+$/, "").split("/").pop() || p;
+}
+
+function shortModel(m) {
+  if (!m) return "";
+  const i = m.lastIndexOf("/");
+  return (i >= 0 ? m.slice(i + 1) : m) || m;
+}
+
+function fitBudget(total, parts) {
+  // parts: array of strings; if combined vw > total, drop from the end until
+  // it fits, and trim the last surviving part with a "…" suffix. Returns
+  // either an array of strings to print, or null to suppress the line.
+  if (vw(parts.join(" │ ")) <= total) return parts;
+  for (let i = parts.length; i > 0; i--) {
+    const kept = parts.slice(0, i);
+    const joiner = " │ ";
+    const sepW = (i - 1) * vw(joiner);
+    const budget = total - sepW;
+    if (vw(kept[kept.length - 1]) <= budget) return kept;
+    // shrink the last surviving part
+    const last = strip(kept[kept.length - 1]);
+    if (vw(last) <= budget) {
+      kept[kept.length - 1] = last;
+      return kept;
+    }
+    // hard cut by grapheme + append "…"
+    let acc = "";
+    let used = 0;
+    const ell = "…";
+    const ellW = vw(ell);
+    for (const ch of last) {
+      const w = vw(ch);
+      if (used + w + ellW > budget) break;
+      acc += ch;
+      used += w;
+    }
+    kept[kept.length - 1] = acc + ell;
+    if (vw(kept.join(joiner)) <= total) return kept;
+  }
+  return null;
+}
+
+async function main() {
+  const raw = await readStdin();
+  let payload = null;
+  try { payload = JSON.parse(raw.trim().split("\n").pop() || "{}"); } catch { return; }
+  if (!payload) return;
+
+  const ws = strip(basename(payload.workspace_dir || ""));
+  const m  = shortModel(strip(payload.model || ""));
+  const t  = strip(payload.session_title || "");
+  if (!ws && !m && !t) return;
+
+  const W = probeWidth();
+
+  // Degrade by width tiers (col count includes the 1-space │ 1-space joins).
+  let parts;
+  if (W >= 50) parts = [ws, m, t].filter(Boolean);
+  else if (W >= 30) parts = [ws, m].filter(Boolean);
+  else if (W >= 18) parts = ws ? [ws] : (m ? [m] : []);
+  else return;
+
+  const fitted = fitBudget(W, parts);
+  if (!fitted) return;
+  process.stdout.write(fitted.join(" │ ") + "\n");
+}
+
+main().catch(() => {});
