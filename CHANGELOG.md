@@ -2,6 +2,39 @@
 
 记录每次对工具集的修改。新条目加在最上面。
 
+## 2026-09-11 — v3.3.2：新增 `mcodex-status-compact`，窄屏 1 行变体
+
+[mcode 0.4.0+ 原生 custom-command 路径] 对小屏 TUI（< 80 列）提供 1 行
+紧凑版 statusline，替代默认的 3 行 block。脚本自己用 `tput cols` 探测
+真实终端宽度并按梯度降级，保证 mcode 自己的视觉宽度省略号不会把内容
+截成 `…`：
+
+| 宽度 | 输出 |
+|---|---|
+| ≥ 50  | `{ws} │ {model} │ {title}` |
+| 30–49 | `{ws} │ {model}` |
+| 18–29 | `{ws}` |
+| < 18  | 静默（statusline 槽位空） |
+
+无 DB 访问（不像 `mcodex-status` 那样查 sqlite），无子进程（除 `tput cols`
+TIOCGWINSZ 探测），纯格式化。任何异常下 exit 0 + 无输出，**不**让坏脚本拖
+TUI 下水（与 `mcodex-status` containment 一致）。
+
+切换方法（需要**重启 mcode** 才生效，参见 `tui.customStatusLine.command`
+只在 `createApp` 时一次读的特性）：
+
+```yaml
+# ~/.minimax/config.yaml
+tui:
+  customStatusLine:
+    command: /path/to/mcodex-status-compact    # 默认是 mcodex-status
+    display: inline                            # 默认 block
+    maxLines: 1                                # 默认 3
+```
+
+完整功能与窄屏感知的取舍，看 [`README.md` §"窄屏行为"] 与
+[`MAINTENANCE.md` §3]。`./mcodex doctor` 与 `./mcodex status` 输出未变。
+
 ## 2026-09-11 — v3.3.1：文档对齐两条策略，补升级手册
 
 v3.3.0 引入原生路径后，`AGENTS.md` / `INSTALL.md` 仍按"只有 fork"写

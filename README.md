@@ -191,6 +191,27 @@ tests/mcode-smoke.mjs    行为回归
 | ≤ 20% | 暗红 | `(200,80,80)` |
 | 无数据 | 灰 | `(140,140,140)` |
 
+### 窄屏模式：`mcodex-status-compact`（v3.3.2+，可选）
+
+3 行 block 在 < 80 列的小终端会被 mcode 自家视觉宽度截断抹掉一部分。
+`mcodex-status-compact` 是 **1 行变体**：脚本用 `tput cols` 自己测真实
+宽度并按梯度降级（≥50 → `ws │ model │ title`，30–49 → `ws │ model`，
+18–29 → `ws`，<18 → 静默），**不**让 mcode 的 `…` 省略号再吃掉内容。
+
+切换（改完需要**重启 mcode**）：
+
+```yaml
+# ~/.minimax/config.yaml
+tui:
+  customStatusLine:
+    command: /path/to/mcodex-status-compact    # 替代 mcodex-status
+    display: inline                            # 替代 block
+    maxLines: 1                                # 替代 3
+```
+
+不查 sqlite、无子进程（除 `tput cols`），所以 spawn 快、timeout 设 3s 足够。
+任何异常下静默退出，不拖 TUI 下水。
+
 ## 已知 trade-offs
 
 - **≥0.4.0 刷新下限 10s** —— mcode 的 `intervalSeconds` 最小 10。会话切换会立刻
