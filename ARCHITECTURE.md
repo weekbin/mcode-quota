@@ -1,6 +1,39 @@
-# Architecture — mcodex
+# Architecture — mcodex (v3.4.0 deprecation of launch wrapper)
 
-## 0. 两条策略（按 mcode 版本分发）
+> **v3.4.0 起 `mcodex`(无子命令)是 deprecation 中的 wrapper**。装好
+> `mcodex-install` 之后**直接用 `mcode` 启动**就好,不需要 `mcodex`
+> 入口。`mcodex` wrapper 还存在的唯一理由是 install / uninstall /
+> status / doctor 四个维护子命令。完整 roadmap 见
+> [MAINTENANCE.md §10](MAINTENANCE.md#10-mcodex-入口-deprecation-路线图v340-起)。
+
+## 0. 启动路径（mcode ≥ 0.4.0, 主流）
+
+```
+                            用户
+                             │
+                          mcode                 ← 直接跑 mcode
+                             │
+                             ▼
+              ┌────────────────────────────┐
+              │     mcode 0.4.0+ cli.js    │
+              │   读 ~/.minimax/config.yaml│
+              │   tui.customStatusLine     │
+              │   .command = mcodex-status │
+              └──────────┬─────────────────┘
+                         │  spawn (stdin JSON,
+                         │   每 10s / 切 session)
+                         ▼
+                  mcodex-status            ← 唯一需要 PATH 入口的脚本
+                         │
+                         ▼
+                  lib/render.mjs (3 行)
+```
+
+`mcodex-install` 只在**安装期**碰一次 config.yaml(把
+`customStatusLine` 两键写进去),之后 mcode 自己读、自己 spawn,
+`mcodex` 不出现在启动路径上。
+
+## 0.5. legacy fork 路径（mcode < 0.4.0, 维护期)
 
 ```
                     mcodex [args]

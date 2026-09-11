@@ -25,14 +25,18 @@
 见 [INSTALL.md](INSTALL.md)，或直接跑 `./mcodex-install`。
 
 ```bash
-./mcodex install     # 写入 config.yaml（≥0.4.0）或说明 legacy 无需安装
+./mcodex-install     # 一次装好（写 config.yaml + 装 mmx + 装 PATH 入口）
 ./mcodex status      # 当前策略、配置状态
-./mcodex doctor      # 自检
-./mcodex             # 确保已安装，然后启动 mcode
+./mcodex doctor      # 自检（17 项）
+
+mcode                # 启动 mcode —— ≥ 0.4.0 直接用 mcode 即可
 ```
 
-≥ 0.4.0 装好之后**直接跑 `mcode` 也能看到这 3 行** —— `mcodex` 只在安装/自检时
-需要。
+> **v3.4.0 起 `mcodex`(无子命令)是 deprecation 中的 wrapper**——它跟
+> `mcode` 等价(同一份 `cli.js`、同一份 `~/.minimax/config.yaml`)。装好
+> 之后**直接跑 `mcode` 就行**；`mcodex` 只在维护场景(`install` /
+> `uninstall` / `status` / `doctor`)还有用。完整 roadmap 见
+> [MAINTENANCE.md §10](MAINTENANCE.md#10-mcodex-入口-deprecation-路线图v340-起)。
 
 ## mcode 升级时我要做什么
 
@@ -40,6 +44,7 @@
 mcode update          # 升级 mcode
 mcodex install        # 刷新配置（幂等；<0.4.0 时无需执行）
 mcodex doctor         # 期望 0 failures
+mcode                 # 直接跑 mcode
 ```
 
 **≥ 0.4.0 绝大多数情况下到此为止** —— 我们只依赖 mcode 的配置 schema 和两处

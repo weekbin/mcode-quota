@@ -2,6 +2,68 @@
 
 记录每次对工具集的修改。新条目加在最上面。
 
+## 2026-09-11 — v3.4.0：开始 deprecate `mcodex` 启动 wrapper
+
+mcode ≥ 0.4.0（v3.3.0 起 native `tui.customStatusLine` 路径）以后
+mcodex **不再 fork mcode 源码**——它只剩两个职责：
+
+1. 一次性写配置（`./mcodex-install`）
+2. 维护期诊断（`./mcodex status` / `./mcodex doctor` / `uninstall`）
+
+**`mcodex`（无子命令）/`mcodex -c` 跟 `mcode` / `mcode -c` 已经完全等价**
+——同一份 `cli.js`、同一份 `~/.minimax/config.yaml`，是冗余入口。从
+v3.4.0 起按三步退出：
+
+| 阶段 | 动作 | 目标 |
+|---|---|---|
+| **v3.4.0（现在）** | `mcodex` 无子命令启动 → stderr 一行 deprecation warning，仍 exec mcode；`--no-deprecation-warning` 或 `MCODEX_NO_DEPRECATION_WARNING=1` 静默 | 提醒但不破坏现有 muscle memory |
+| **v3.5.0（计划）** | `mcodex-install` 默认**不**安装 `~/.minimax/bin/mcodex` symlink（仍可 `--with-mcodex-wrapper` opt-in） | PATH 入口变成 opt-in |
+| **v4.0.0（目标）** | 删 `mcodex` wrapper 脚本本体；只留 `mcodex-install` / `mcodex-status` / `mcodex-doctor` / `mcodex-push-remote` / `mcodex-status-compact` 几个独立脚本 | `mcode` 是唯一的启动命令 |
+
+为什么不是 v3.4.0 一步到位：
+
+- wrapper 仍然承担"ensure config 落盘"的 safety net——刚 `mcode
+  update` 完没看到状态栏的用户，wrapper 的 `native_apply apply` 会把缺
+  失的 `customStatusLine` 键补回 `~/.minimax/config.yaml`。直接拿掉
+  会让这部分用户误以为是 bug
+- 0.4.0 之前的 legacy fork 路径仍在生产使用（虽然本机已全切到 native），
+  wrapper 里的 `IS_NATIVE=0` 分支还需继续工作到最后一个 0.3.x 用户迁移
+- `mcodex status` / `mcodex doctor` 是文档里大量出现的工具，删 wrapper
+  之前必须先把它们提到独立脚本
+
+### 改动文件
+
+- `mcodex` — 加 deprecation warning + `--no-deprecation-warning` /
+  `MCODEX_NO_DEPRECATION_WARNING` 静默开关；`install` / `uninstall` /
+  `status` / `doctor` 仍静默
+- `MAINTENANCE.md` — 新增 §10 deprecation 路线图
+- `AGENTS.md` — "What mcodex is" 段重写；强调 `mcode` 为主线
+- `INSTALL.md` — TL;DR 第 3 步从 `mcodex` 改为 `mcode`；加 v3.4.0
+  deprecation callout
+- `README.md` — "快速开始" 段同步；加 [MAINTENANCE.md §10] 链接
+- `ARCHITECTURE.md` — 重画启动路径图：mcode 直上，`mcodex` 退到
+  安装期 + 维护期两个边缘位置
+
+### Sanity check
+
+```bash
+# 启动会出 deprecation warning
+mcodex --help 2>&1 | head -1
+# 期望: mcodex: launching via this wrapper is deprecated; ...
+
+# 静默旗标
+mcodex --no-deprecation-warning --help 2>&1 | head -1
+# 期望: Usage: mcode [options] ...（无 warning）
+
+# 维护子命令不出 warning
+mcodex status 2>&1 | grep -i deprecate
+# 期望: 空
+
+# doctor 仍绿
+mcodex doctor 2>&1 | tail -1
+# 期望: Result: 17 ok, 0 warnings, 0 failures
+```
+
 ## 2026-09-11 — v3.3.3：修 `mcodex-status` 无 sessionId 时整条底栏消失
 
 ### 根因（一句话）

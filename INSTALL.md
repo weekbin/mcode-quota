@@ -29,11 +29,16 @@ git clone https://github.com/weekbin/mcode-quota.git ~/Works/mcode-quota
 cd ~/Works/mcode-quota
 ./mcodex-install                        # or --check for diagnostic-only
 
-# 3. Verify, then use
+# 3. Verify, then use plain `mcode`
 ./mcodex status                         # which strategy + config state
-./mcode-quota-doctor                    # self-check
-mcodex                                  # start mcode (or just run `mcode`)
+./mcode-quota-doctor                    # self-check (17 项)
+mcode                                   # 启动 mcode —— 直接用 mcode 即可
 ```
+
+> **v3.4.0 起 `mcodex`(无子命令)是 deprecation 中的 wrapper**——它跟
+> `mcode` 等价(同一份 `cli.js`、同一份 `~/.minimax/config.yaml`)。
+> 装好之后**直接跑 `mcode` 就行**；`mcodex` 只在维护场景(装 / 卸 /
+> status / doctor)还有用。完整 roadmap 见 MAINTENANCE.md §10。
 
 `mcodex-install` auto-detects your mcode layout, builds the shim if
 needed, installs `mmx-cli` for the 5h/周 data source, then runs one

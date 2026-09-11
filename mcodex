@@ -183,9 +183,33 @@ legacy_status() {
 }
 
 # ---------------------------------------------------------------------------
+# deprecation warning (v3.4.0 — see MAINTENANCE.md §8)
+#
+# `mcodex` was the launcher in the legacy fork era. Since mcode 0.4.0 (native
+# `tui.customStatusLine` path, v3.3.0) the install / status / doctor subcommands
+# are still useful for maintenance, but launching through `mcodex` is
+# functionally equivalent to running `mcode` directly — both end up at the
+# same `cli.js` reading the same `~/.minimax/config.yaml`. Print a one-line
+# deprecation notice on launch (suppress with `--no-deprecation-warning`) and
+# still exec mcode so the user can migrate at their own pace.
+# ---------------------------------------------------------------------------
+MCODEX_NO_DEPRECATION_WARNING="${MCODEX_NO_DEPRECATION_WARNING:-}"
+deprecation_warning() {
+  [[ -n "$MCODEX_NO_DEPRECATION_WARNING" ]] && return 0
+  echo "mcodex: launching via this wrapper is deprecated; use \`mcode\` directly. (mcodex subcommands install/status/doctor/uninstall are not deprecated; only the launch path is.)" >&2
+}
+
+# ---------------------------------------------------------------------------
 # dispatch
 # ---------------------------------------------------------------------------
 if [[ "$IS_NATIVE" == "1" ]]; then
+  # Strip the deprecation-flag before passing remaining args to mcode, so it
+  # doesn't leak into mcode's argv.
+  if [[ "${1:-}" == "--no-deprecation-warning" ]]; then
+    shift
+    MCODEX_NO_DEPRECATION_WARNING=1
+  fi
+
   case "${1:-}" in
     install)
       native_apply apply
@@ -209,6 +233,8 @@ if [[ "$IS_NATIVE" == "1" ]]; then
   # Ensure the config is in place before launching. Cheap (one file read) and
   # self-healing if mcode rewrites config.yaml.
   native_apply apply || true
+
+  deprecation_warning
 
   if [[ ! -x "$STATUS_BIN" ]]; then
     echo "mcodex: WARNING ${STATUS_BIN} is not executable; the status block will be empty" >&2

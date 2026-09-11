@@ -4,26 +4,33 @@
 > not have it yet, **read this file first.** It tells you exactly what to
 > do, in what order, and how to recover when things go wrong.
 
-## What mcodex is
+## What mcodex is (and isn't) — v3.4.0 起
 
-Adds a 3-line quota / token status block under mcode's status bar
-(会话 tokens + 上下文 / 5h-周 limits / 今日 per-LLM-model totals) **without
-ever modifying mcode itself.**
+mcodex **不再 fork mcode 源码**(自 v3.3.0 起, mcode ≥ 0.4.0 native
+`tui.customStatusLine` 路径)。它只做两件事:
 
-There are two strategies, picked automatically from the installed mcode
-version — do not assume the fork one:
+1. **安装期一次性写配置**:`./mcodex-install` 把 `tui.statusLine` +
+   `tui.customStatusLine` 合并进 `~/.minimax/config.yaml`,之后 mcode
+   自己读这份配置、自己 spawn `mcodex-status` 拿 quota 行
+2. **维护期诊断**:`./mcodex status` 看 strategy & config 状态、
+   `./mcodex-doctor` 跑 17 项自检
 
-| mcode | strategy | how it works |
+**`mcodex`(无子命令)跟 `mcode` 等价** — 同一份 `cli.js`、同一份
+config。`mcodex -c` 跟 `mcode -c` 也等价。详见 MAINTENANCE.md §10
+deprecation roadmap(v3.4 警告 / v3.5 不默认装 symlink / v4.0 删 wrapper)。
+
+有两种 strategy, 按 mcode 版本自动分:
+
+| mcode | strategy | 干了什么 |
 |---|---|---|
-| **≥ 0.4.0** | **native (default now)** | mcodex merges `tui.statusLine` + `tui.customStatusLine` into `~/.minimax/config.yaml`; mcode's own `custom-command` status item then runs `<repo>/mcodex-status` (stdin JSON in, up to 5 stdout lines out). No fork, no patching, nothing to rebuild. |
-| **< 0.4.0** | legacy fork | `patches/_loader.mjs` picks `patches/<version>/` and patches a private pristine fork at `~/.local/share/mcode-quota/mcode-clone/<v>/code/`. |
+| **≥ 0.4.0** | **native(主流)** | 写 `~/.minimax/config.yaml` 的 `tui.customStatusLine.command` 指向 `<repo>/mcodex-status`, mcode 自己用 mcode 内置的 custom-command 机制跑它。**不 fork、不 patch** |
+| **< 0.4.0** | legacy fork | `patches/_loader.mjs` 选 `patches/<version>/`,patcher 在 `~/.local/share/mcode-quota/mcode-clone/<v>/code/` 构私有 fork |
 
-Both paths share one renderer (`lib/render.mjs`); `tests/parity.mjs` asserts
-their output is byte-identical. The doctor's core invariant for **both**:
-**mcode's own installation is unmodified** — on the native path it is not
-even opened for writing.
+两条路径共用 `lib/render.mjs`; `tests/parity.mjs` 断言输出逐字节
+一致。核心不变量对两条都成立:**mcode 本体从来没被改过** —— native
+路径连写都不写它。
 
-Check which one applies before doing anything:
+Check 哪条生效:
 
 ```bash
 ./mcodex status
