@@ -2,6 +2,53 @@
 
 记录每次对工具集的修改。新条目加在最上面。
 
+## 2026-09-11 — v3.3.3：修 `mcodex-status` 在 picker/welcome 屏静默 → mcode 0.4.x 整条底栏消失
+
+mcode ≥ 0.4.0 的 `va` StatusLine 渲染逻辑（`launcher-U2WCORIY.js:209` 与
+0.4.0 同样位置逐字相同）：
+
+```js
+return u.length===0 && l.length===0 ? [] : ...;
+```
+
+——**只要 custom-command 那块没输出，连同所有 regular items（current-dir /
+model / git-branch 等）整条底栏一起不画**。
+
+旧 `mcodex-status` 在 `!sessionId` 时早 return（注释："transient rows
+are not worth the flicker"）—— 假设 mcode < 0.4.0 没有 statusline
+概念、picking 屏本就不画底栏。**但 mcode ≥ 0.4.0 的策略反了**：picker
+屏 / welcome 屏仍然画底栏，只是不画 custom block；custom block 空 → 整
+条底栏不渲染 → 用户看到的是"无 session 时底栏消失"，而 `mcode -c` /
+进入 active session 后底栏才出现，看起来像 `mcode` 与 `mcode -c` 行为不
+同，其实是同一个机制在两种 session 状态下的表现不同。
+
+修复（`mcodex-status`）：
+
+```diff
+   if (!sessionId) {
+-    return;   // 旧:picker 屏整条底栏消失
++    // 新:无 session 时仍输出 1 行 fallback,让 mcode 的 va.render() 看到
++    // customStatusText 非空,继续渲染底栏(以及 current-dir / model 等
++    // regular items)
++    const ws  = (payload.workspace_dir||"").replace(/\/+$/,"").split("/").pop()||"";
++    const mdl = (payload.model||"").split("/").pop()||"";
++    const parts = [ws, mdl].filter(Boolean);
++    if (parts.length===0) return;
++    process.stdout.write(parts.join(" │ ") + "\n");
++    return;
+   }
+```
+
+效果：
+
+| 启动 | sessionId | `mcodex-status` 输出 | 底栏 |
+|---|---|---|---|
+| `mcode` plain（picker） | 无 | `mcode │ MiniMax-M3`（1 行 fallback） | 可见 |
+| `mcode -c`（续会话） | 有 | 3 行块（4-chunk + 5h·周 + 今日） | 可见 |
+| `mcode` 之后选了空 session | 无 | 同上 fallback | 可见 |
+
+不再有 `mcode` 与 `mcode -c` 的底栏行为差异。
+
 ## 2026-09-11 — v3.3.2：新增 `mcodex-status-compact`，窄屏 1 行变体
 
 [mcode 0.4.0+ 原生 custom-command 路径] 对小屏 TUI（< 80 列）提供 1 行

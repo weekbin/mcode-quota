@@ -64,10 +64,20 @@ async function main() {
   const sessionId = payload.session_id || "";
   log("event=" + payload.event + " session=" + sessionId + " model=" + payload.model);
 
-  // No session yet (startup in the picker, or a fresh TUI): print nothing.
-  // The 4-chunk row would be pure placeholders and the transient rows are not
-  // worth the flicker.
-  if (!sessionId) return;
+  // No session yet (startup in the picker, or a fresh TUI): emit a single
+  // "no-session" line so mcode 0.4.x's statusline stays visible. Without
+  // this, mcode's StatusLine renderer treats an empty custom-command output
+  // as "no statusline at all" and hides the whole bottom row (including the
+  // regular items like current-dir / model), so the user sees nothing until
+  // a real session is loaded (e.g. via `mcode -c`).
+  if (!sessionId) {
+    const ws  = (payload.workspace_dir || "").replace(/\/+$/, "").split("/").pop() || "";
+    const mdl = (payload.model || "").split("/").pop() || "";
+    const parts = [ws, mdl].filter(Boolean);
+    if (parts.length === 0) return;
+    process.stdout.write(parts.join(" │ ") + "\n");
+    return;
+  }
 
   let state;
   try {
