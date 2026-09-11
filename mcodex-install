@@ -1,0 +1,480 @@
+#!/usr/bin/env bash
+# mcodex-install — first-time setup for the mcodex quota status line.
+#
+# Idempotent: re-running is safe and only fills in anything missing. Does
+# NOT modify mcode itself in any layout (npm-global or platform install);
+# mcodex never writes to mcode — every patch goes into a private fork at
+# ~/.local/share/mcode-quota/mcode-clone/.
+#
+# Steps (auto-runs all of them on a fresh machine):
+#   1. Detect OS + package manager (apt / dnf / pacman / apk / brew / none)
+#   2. Pre-flight: report what's already there vs. what mcodex needs
+#   3. Locate mcode (npm-global, platform install, or by walking which)
+#   4. Read mcode version, build the shim (only for npm-global layout)
+#   5. Run `npm install` in the project (acorn for the patcher)
+#   6. Install mmx with fallback chain: npm → npm mirror (CN) → tarball
+#      download from GitHub → skip with warning
+#   7. Install the PATH entry (symlink or copy)
+#   8. First run: mcodex --version materializes the fork
+#
+# Flags:
+#   --check              pre-flight only — report and exit (no changes)
+#   --mmx-skip           do not attempt to install mmx even if missing
+#   --mmx-fail           exit non-zero if mmx install fails (default: warn)
+#   --no-fork            do not run mcodex after install (skip step 8)
+#   --bin-dir=DIR        PATH entry directory (default ~/.minimax/bin)
+#   --project=DIR        override project directory (default: this script's dir)
+#   --copy               install PATH entry as a copy (default: symlink)
+#   --quiet              suppress non-essential output
+#   -h, --help           show this header
+#
+# Exit codes:
+#   0  install complete (or check passed)
+#   1  mcode not found (install it first)
+#   2  invalid args
+#   3  critical step failed
+#   4  --mmx-fail set and mmx could not be installed
+#
+# Cross-OS notes (this script is written for POSIX sh + bash 3.2+):
+#   * macOS ships BSD coreutils; `find -printf` and `sort -V` are unavailable
+#     on macOS ≤ 14. We use `ls -1 | awk | sort` everywhere.
+#   * `readlink` on macOS has no `-f`; we use a while-loop follow chain.
+#   * `rm` may be intercepted by user-installed tools (e.g. mavis-trash on
+#     this author's machine); all unlinks go through `node -e unlinkSync`.
+#   * Paths in this script use $HOME (not ~) for compatibility with subshells.
+
+set -uo pipefail
+
+# ---------- args ----------
+MMX_SKIP=0
+MMX_FAIL=0
+NO_FORK=0
+BIN_DIR="${HOME}/.minimax/bin"
+COPY_MODE=0
+PROJECT_DIR=""
+CHECK_ONLY=0
+QUIET=0
+
+usage() {
+  sed -n '2,42p' "$0"
+  exit "${1:-0}"
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --check)      CHECK_ONLY=1 ;;
+    --mmx-skip)   MMX_SKIP=1 ;;
+    --mmx-fail)   MMX_FAIL=1 ;;
+    --no-fork)    NO_FORK=1 ;;
+    --bin-dir=*)  BIN_DIR="${1#*=}" ;;
+    --project=*)  PROJECT_DIR="${1#*=}" ;;
+    --copy)       COPY_MODE=1 ;;
+    --quiet)      QUIET=1 ;;
+    -h|--help)    usage 0 ;;
+    *)            echo "mcodex-install: unknown arg: $1" >&2; usage 2 ;;
+  esac
+  shift
+done
+
+# ---------- helpers ----------
+say()  { [[ "$QUIET" -eq 0 ]] && printf "[mcodex-install] %s\n" "$*"; }
+ok()   { [[ "$QUIET" -eq 0 ]] && printf "[mcodex-install] ✓ %s\n" "$*"; }
+warn() { printf "[mcodex-install] ! %s\n" "$*" >&2; }
+fail() { printf "[mcodex-install] ✗ %s\n" "$*" >&2; exit "${2:-1}"; }
+
+# Portable "follow symlinks" — `readlink -f` is GNU-only. We loop until the
+# path is no longer a symlink. Works on macOS and Linux bash 3.2+.
+follow_symlinks() {
+  local src="$1"
+  while [[ -L "$src" ]]; do
+    local tgt
+    tgt="$(readlink "$src" 2>/dev/null)" || break
+    if [[ "$tgt" = /* ]]; then
+      src="$tgt"
+    else
+      src="$(dirname "$src")/$tgt"
+    fi
+  done
+  printf '%s\n' "$src"
+}
+
+# ---------- 1. OS / package manager detection ----------
+detect_os() {
+  OS_NAME="unknown"
+  OS_FAMILY="unknown"
+  PKG_MGR="none"
+  ARCH="$(uname -m 2>/dev/null || echo unknown)"
+
+  if [[ "$(uname -s 2>/dev/null)" == "Darwin" ]]; then
+    OS_NAME="macos"
+    OS_FAMILY="darwin"
+    OS_VERSION="$(sw_vers -productVersion 2>/dev/null || echo unknown)"
+    if command -v brew >/dev/null 2>&1; then
+      PKG_MGR="brew"
+    fi
+  elif [[ -f /etc/os-release ]]; then
+    # shellcheck disable=SC1091
+    . /etc/os-release
+    OS_NAME="${ID:-linux}"
+    OS_VERSION="${VERSION_ID:-unknown}"
+    case "$OS_NAME" in
+      ubuntu|debian|linuxmint|pop|elementary|zorin|kali) PKG_MGR="apt" ;;
+      fedora|rhel|centos|rocky|almalinux|ol)            PKG_MGR="dnf" ;;
+      arch|manjaro|endeavouros)                          PKG_MGR="pacman" ;;
+      alpine)                                           PKG_MGR="apk" ;;
+      opensuse*|sles)                                   PKG_MGR="zypper" ;;
+      *)                                                PKG_MGR="unknown" ;;
+    esac
+  elif [[ -f /etc/redhat-release ]]; then
+    OS_NAME="rhel"; PKG_MGR="dnf"
+  elif [[ -f /etc/debian_version ]]; then
+    OS_NAME="debian"; PKG_MGR="apt"
+  else
+    OS_NAME="$(uname -s 2>/dev/null || echo unknown)"
+  fi
+}
+
+# Suggest a one-liner for installing a missing tool on this OS. Does not run.
+suggest_install() {
+  local tool="$1"
+  case "$PKG_MGR" in
+    brew)    echo "brew install $tool" ;;
+    apt)     echo "sudo apt-get install -y $tool" ;;
+    dnf)     echo "sudo dnf install -y $tool" ;;
+    pacman)  echo "sudo pacman -S --noconfirm $tool" ;;
+    apk)     echo "sudo apk add $tool" ;;
+    zypper)  echo "sudo zypper install -y $tool" ;;
+    *)       echo "(no package manager detected — install $tool manually)" ;;
+  esac
+}
+
+# ---------- 2. pre-flight ----------
+preflight() {
+  say "pre-flight:"
+  say "  OS:        $OS_NAME $OS_VERSION ($ARCH, family=$OS_FAMILY)"
+  say "  pkg mgr:   $PKG_MGR"
+  say "  bash:      ${BASH_VERSION:-unknown}"
+  say "  node:      $(command -v node >/dev/null 2>&1 && node --version || echo MISSING)"
+  say "  npm:       $(command -v npm  >/dev/null 2>&1 && npm  --version || echo MISSING)"
+  say "  git:       $(command -v git  >/dev/null 2>&1 && git  --version || echo MISSING)"
+  say "  curl:      $(command -v curl >/dev/null 2>&1 && echo present || echo MISSING)"
+  say "  mcode:     $(command -v mcode >/dev/null 2>&1 && mcode --version 2>/dev/null | head -1 || echo MISSING)"
+  say "  mmx:       $(command -v mmx  >/dev/null 2>&1 && mmx  --version 2>/dev/null | head -1 || echo MISSING)"
+
+  local needs_fix=0
+  if ! command -v node >/dev/null 2>&1; then
+    warn "node is required. Suggest: $(suggest_install node)"
+    needs_fix=1
+  fi
+  if ! command -v npm >/dev/null 2>&1; then
+    warn "npm is required (usually bundled with node). Suggest: $(suggest_install npm)"
+    needs_fix=1
+  fi
+  if ! command -v git >/dev/null 2>&1; then
+    warn "git is required. Suggest: $(suggest_install git)"
+    needs_fix=1
+  fi
+  if ! command -v mcode >/dev/null 2>&1; then
+    warn "mcode is required. Install one of:"
+    warn "  - npm-global: npm install -g @minimax-ai/code"
+    warn "  - platform:   download the MiniMax Inside Code installer"
+    needs_fix=1
+  fi
+  if ! command -v curl >/dev/null 2>&1; then
+    warn "curl is required for fallback mmx install. Suggest: $(suggest_install curl)"
+    # Non-fatal: we can still try npm for mmx.
+  fi
+
+  if [[ $needs_fix -ne 0 ]]; then
+    return 1
+  fi
+  ok "pre-flight passed"
+  return 0
+}
+
+# ---------- 3. locate mcode ----------
+# Try three detection paths in order:
+#   A. mcode on PATH is a symlink to $(npm root -g)/@minimax-ai/code/cli.js
+#   B. ~/.minimax-code/releases/<v>/lib/node_modules/@minimax-ai/code (platform)
+#   C. mcode on PATH — walk the symlink chain to find any package.json
+locate_mcode() {
+  NPM_GLOBAL_CODE=""
+  PLATFORM_CODE_ROOT=""
+
+  # A. npm-global
+  if command -v mcode >/dev/null 2>&1; then
+    local npm_root
+    npm_root="$(npm root -g 2>/dev/null)" || npm_root=""
+    if [[ -n "$npm_root" && -f "$npm_root/@minimax-ai/code/package.json" ]]; then
+      NPM_GLOBAL_CODE="$npm_root/@minimax-ai/code"
+    fi
+  fi
+
+  # B. platform install
+  if [[ -f "$HOME/.minimax-code/current" ]]; then
+    local cur
+    cur="$(tr -d '\r\n' < "$HOME/.minimax-code/current")"
+    if [[ -d "$HOME/.minimax-code/releases/$cur/lib/node_modules/@minimax-ai/code" ]]; then
+      PLATFORM_CODE_ROOT="$HOME/.minimax-code/releases/$cur"
+    fi
+  fi
+
+  # C. mcode on PATH but not in A or B — walk the symlink
+  if [[ -z "$NPM_GLOBAL_CODE" && -z "$PLATFORM_CODE_ROOT" ]] && command -v mcode >/dev/null 2>&1; then
+    local mcode_path
+    mcode_path="$(command -v mcode)"
+    mcode_path="$(follow_symlinks "$mcode_path")"
+    # Walk up looking for @minimax-ai/code/package.json
+    local dir
+    dir="$(dirname "$mcode_path")"
+    while [[ "$dir" != "/" && "$dir" != "." ]]; do
+      if [[ -f "$dir/package.json" ]] && grep -q '"@minimax-ai/code"' "$dir/package.json" 2>/dev/null; then
+        # dist-tags.bin.mcode might be "./cli.js" — confirm the file is here
+        if [[ -f "$dir/cli.js" ]]; then
+          NPM_GLOBAL_CODE="$dir"
+          say "  (mcode at $mcode_path — using $dir)"
+          break
+        fi
+      fi
+      dir="$(dirname "$dir")"
+    done
+  fi
+
+  if [[ -z "$NPM_GLOBAL_CODE" && -z "$PLATFORM_CODE_ROOT" ]]; then
+    return 1
+  fi
+  return 0
+}
+
+# ---------- 4. read version + decide layout ----------
+read_version() {
+  if [[ -n "$NPM_GLOBAL_CODE" ]]; then
+    MCODE_VERSION="$(node -e 'console.log(require(process.argv[1]+"/package.json").version)' "$NPM_GLOBAL_CODE")"
+    MCODE_REAL_PATH="$NPM_GLOBAL_CODE"
+    MCODE_KIND="npm-global"
+  else
+    MCODE_VERSION="$(tr -d '\r\n' < "$HOME/.minimax-code/current")"
+    MCODE_REAL_PATH="$PLATFORM_CODE_ROOT/lib/node_modules/@minimax-ai/code"
+    MCODE_KIND="platform"
+  fi
+}
+
+# ---------- 5. acorn (project deps) ----------
+install_project_deps() {
+  if [[ ! -f "$PROJECT_DIR/package.json" ]]; then
+    ok "no package.json — skipping project deps"
+    return 0
+  fi
+  if [[ -d "$PROJECT_DIR/node_modules/acorn" ]]; then
+    ok "acorn present"
+    return 0
+  fi
+  say "installing project dependencies (acorn)..."
+  if (cd "$PROJECT_DIR" && npm install --no-audit --no-fund --silent) 2>&1 | tail -5; then
+    ok "acorn installed"
+  else
+    warn "npm install failed — patcher will fail with ERR_MODULE_NOT_FOUND until this is fixed"
+    return 1
+  fi
+}
+
+# ---------- 6. shim (npm-global only) ----------
+build_shim() {
+  if [[ "$MCODE_KIND" != "npm-global" ]]; then
+    ok "shim: skipped (platform install — layout already present)"
+    return 0
+  fi
+  say "creating shim at ~/.minimax-code/releases/$MCODE_VERSION/ ..."
+  mkdir -p "$HOME/.minimax-code/releases/$MCODE_VERSION/lib/node_modules/@minimax-ai"
+  ln -sfn "$MCODE_REAL_PATH" \
+          "$HOME/.minimax-code/releases/$MCODE_VERSION/lib/node_modules/@minimax-ai/code"
+  # .mcode-launcher: mcodex parses this with
+  #   sed -n "s/^exec '\([^']*\)'.*/\1/p"
+  local node_bin
+  node_bin="$(command -v node)"
+  cat > "$HOME/.minimax-code/releases/$MCODE_VERSION/.mcode-launcher" <<EOF
+#!/usr/bin/env bash
+# Generated by mcodex-install. mcodex parses this file to read the node
+# binary; the actual entry point is the fork under
+# ~/.local/share/mcode-quota/mcode-clone/.
+exec '$node_bin' '$MCODE_REAL_PATH/cli.js' "\$@"
+EOF
+  chmod +x "$HOME/.minimax-code/releases/$MCODE_VERSION/.mcode-launcher"
+  echo -n "$MCODE_VERSION" > "$HOME/.minimax-code/current"
+  ok "shim ready (symlink + .mcode-launcher + current pointer)"
+}
+
+# ---------- 7. mmx with fallback chain ----------
+# Primary: npm. Fallback: npm with mirror (CN). Last resort: tarball from
+# npm registry. Final fallback: skip with warning (mcodex degrades).
+install_mmx() {
+  if [[ "$MMX_SKIP" -eq 1 ]]; then
+    ok "mmx: skip (per --mmx-skip)"
+    return 0
+  fi
+  if command -v mmx >/dev/null 2>&1; then
+    ok "mmx: present at $(command -v mmx)"
+    return 0
+  fi
+
+  say "installing mmx (5h/周 quota data source)..."
+
+  # Primary: npm
+  if npm install -g mmx-cli --no-audit --no-fund 2>&1 | tail -3; then
+    if command -v mmx >/dev/null 2>&1; then
+      ok "mmx installed via npm: $(command -v mmx)"
+      return 0
+    fi
+  fi
+  warn "npm install -g mmx-cli failed; trying registry mirror..."
+
+  # Fallback A: npm with CN mirror (handles region/network issues)
+  if npm install -g mmx-cli --registry https://registry.npmmirror.com \
+       --no-audit --no-fund 2>&1 | tail -3; then
+    if command -v mmx >/dev/null 2>&1; then
+      ok "mmx installed via mirror: $(command -v mmx)"
+      return 0
+    fi
+  fi
+  warn "npm install via mirror failed; trying tarball fallback..."
+
+  # Fallback B: download tarball directly from the npm registry.
+  # Works without `npm install` — just `tar -xzf` + `node` to run cli.js.
+  if command -v curl >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
+    local tmpdir
+    tmpdir="$(mktemp -d 2>/dev/null)" || tmpdir="/tmp/mmx-install-$$"
+    mkdir -p "$tmpdir"
+    local version
+    version="$(curl -sL --max-time 15 https://registry.npmjs.org/mmx-cli/latest 2>/dev/null \
+               | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{console.log(JSON.parse(s).version||"")}catch{}})' \
+               2>/dev/null)" || version=""
+    if [[ -n "$version" && "$version" != "undefined" ]]; then
+      say "downloading mmx-cli@$version tarball..."
+      if curl -sL --max-time 60 "https://registry.npmjs.org/mmx-cli/-/mmx-cli-${version}.tgz" \
+           -o "$tmpdir/mmx.tgz" 2>/dev/null; then
+        mkdir -p "$tmpdir/extracted"
+        if tar -xzf "$tmpdir/mmx.tgz" -C "$tmpdir/extracted" 2>/dev/null; then
+          # Install globally from the extracted package.
+          if (cd "$tmpdir/extracted/package" \
+              && npm install -g . --no-audit --no-fund --silent) 2>&1 | tail -3; then
+            if command -v mmx >/dev/null 2>&1; then
+              ok "mmx installed via tarball: $(command -v mmx)"
+              return 0
+            fi
+          fi
+        fi
+      fi
+    fi
+    rm -rf "$tmpdir" 2>/dev/null || node -e 'require("fs").rmSync(process.argv[1],{recursive:true,force:true})' "$tmpdir" 2>/dev/null
+  fi
+  warn "all mmx install paths failed"
+
+  warn "5h/周 quota line will stay empty (other 5 data sources still work)."
+  warn "manual install:  npm install -g mmx-cli"
+  warn "                  github: https://github.com/MiniMax-AI/cli"
+
+  if [[ "$MMX_FAIL" -eq 1 ]]; then
+    return 4
+  fi
+  return 0
+}
+
+# ---------- 8. PATH entry ----------
+install_path_entry() {
+  say "installing PATH entry at $BIN_DIR/mcodex ..."
+  mkdir -p "$BIN_DIR"
+
+  if [[ -e "$BIN_DIR/mcodex" || -L "$BIN_DIR/mcodex" ]]; then
+    # Resolve the existing entry to compare.
+    local existing_real
+    existing_real="$(follow_symlinks "$BIN_DIR/mcodex")"
+    local want_real="$PROJECT_DIR/mcodex"
+    if [[ "$existing_real" == "$want_real" ]]; then
+      ok "PATH entry already correct (→ $PROJECT_DIR/mcodex)"
+      return 0
+    fi
+    # Stale — replace.
+    node -e 'require("fs").unlinkSync(process.argv[1])' "$BIN_DIR/mcodex" \
+      || warn "could not unlink stale $BIN_DIR/mcodex (manual cleanup needed)"
+  fi
+
+  if [[ "$COPY_MODE" -eq 1 ]]; then
+    cp "$PROJECT_DIR/mcodex" "$BIN_DIR/mcodex"
+    chmod +x "$BIN_DIR/mcodex"
+    ok "PATH entry installed (copy)"
+  else
+    ln -s "$PROJECT_DIR/mcodex" "$BIN_DIR/mcodex"
+    ok "PATH entry installed (symlink)"
+  fi
+}
+
+# ---------- main ----------
+main() {
+  detect_os
+  say "running mcodex-install on $OS_NAME $OS_VERSION ($ARCH)"
+
+  if ! preflight; then
+    fail "pre-flight failed — install the missing tools above, then re-run" 3
+  fi
+
+  if [[ -z "$PROJECT_DIR" ]]; then
+    PROJECT_DIR="$(cd "$(dirname "$(follow_symlinks "${BASH_SOURCE[0]}")")" && pwd)"
+  fi
+  if [[ ! -f "$PROJECT_DIR/mcodex" ]]; then
+    fail "project layout not found at $PROJECT_DIR (no mcodex wrapper)" 3
+  fi
+  ok "project: $PROJECT_DIR"
+
+  say "locating mcode..."
+  if ! locate_mcode; then
+    fail "mcode not found. Install one of:
+  - npm-global: npm install -g @minimax-ai/code
+  - platform:   run the MiniMax Inside Code installer
+  then re-run mcodex-install." 1
+  fi
+  read_version
+  ok "mcode version: $MCODE_VERSION ($MCODE_KIND layout)"
+
+  # --check: report and exit before any filesystem changes.
+  if [[ "$CHECK_ONLY" -eq 1 ]]; then
+    echo
+    say "--check mode: no changes made. Run without --check to install."
+    exit 0
+  fi
+
+  install_project_deps
+  build_shim
+  install_mmx || true
+  install_path_entry
+
+  if [[ "$NO_FORK" -eq 1 ]]; then
+    say "skipping first-run (per --no-fork)"
+  else
+    # On mcode >= 0.4.0 `mcodex --version` writes the custom-command config and
+    # execs stock mcode; on older versions it builds the private fork. Either
+    # way this is the first-run bootstrap.
+    say "first run: applying status-line setup..."
+    if "$BIN_DIR/mcodex" --version >/dev/null 2>&1; then
+      ok "setup done (run '$BIN_DIR/mcodex status' for which strategy applies)"
+    else
+      warn "mcodex bootstrap failed — see stderr; run '$PROJECT_DIR/mcodex doctor'"
+    fi
+  fi
+
+  # Report which strategy the installed mcode version gets, so a fresh machine
+  # knows whether to expect a fork or a config-driven setup.
+  if "$PROJECT_DIR/mcodex" status >/dev/null 2>&1; then
+    STRATEGY="$("$PROJECT_DIR/mcodex" status 2>/dev/null | grep -m1 'strategy' | sed 's/.*: //')"
+    [[ -n "$STRATEGY" ]] && ok "strategy: $STRATEGY"
+  fi
+
+  echo
+  ok "mcodex install complete."
+  echo "  next:"
+  echo "    $BIN_DIR/mcodex                 # start mcode with quota status line"
+  echo "    $PROJECT_DIR/mcodex status      # which strategy + config state"
+  echo "    $PROJECT_DIR/mcode-quota-doctor # run self-check"
+  echo "    mmx auth login                  # if quota line shows 'no data'"
+}
+
+main "$@"

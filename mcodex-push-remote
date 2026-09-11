@@ -51,6 +51,27 @@ echo "[3/3] pushing to ${REMOTE_URL} ..."
   cd "${MIRROR}"
   git remote add origin "${REMOTE_URL}"
   # Use gh's credential helper so we don't need to re-auth.
+
+  # The remote may have moved ahead of us — e.g. another machine pushed work
+  # while this tree was being edited. A plain push then fails as
+  # non-fast-forward, and force-pushing would destroy those commits.
+  #
+  # Instead: fetch the remote and MERGE it with `-s ours`. That records the
+  # remote tip as a second parent (so the push fast-forwards and nothing is
+  # lost from the graph) while keeping THIS tree as the result — which is
+  # correct because any remote changes have already been reconciled into the
+  # working tree by hand before running this script.
+  if git fetch -q origin master 2>/dev/null; then
+    if git merge-base --is-ancestor origin/master HEAD 2>/dev/null; then
+      echo "  remote is behind us; fast-forward push"
+    else
+      BEHIND="$(git rev-list --count HEAD..origin/master 2>/dev/null || echo '?')"
+      echo "  remote is ahead by ${BEHIND} commit(s); merging with -s ours"
+      echo "  (their graph is preserved; their content must already be in this tree)"
+      git merge -q --no-edit -s ours origin/master
+    fi
+  fi
+
   git -c credential.helper='!gh auth git-credential' push -u origin master
 )
 

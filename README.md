@@ -21,6 +21,9 @@
 
 ## 快速开始
 
+**新机器首次安装**（macOS / Linux，自动检测 mcode 装法 + 装缺失依赖）：
+见 [INSTALL.md](INSTALL.md)，或直接跑 `./mcodex-install`。
+
 ```bash
 ./mcodex install     # 写入 config.yaml（≥0.4.0）或说明 legacy 无需安装
 ./mcodex status      # 当前策略、配置状态

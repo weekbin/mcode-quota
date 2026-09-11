@@ -6,7 +6,8 @@
   "bin": {
     "mcodex": "./mcodex",
     "mcodex-status": "./mcodex-status",
-    "mcode-quota-doctor": "./mcode-quota-doctor"
+    "mcode-quota-doctor": "./mcode-quota-doctor",
+    "mcodex-install": "./mcodex-install"
   },
   "scripts": {
     "patch": "node patches/_loader.mjs",
@@ -26,7 +27,12 @@
     "ARCHITECTURE.md",
     "MAINTENANCE.md",
     "CHANGELOG.md",
-    "DECISIONS.md"
+    "DECISIONS.md",
+    "mcodex-install",
+    "AGENTS.md",
+    "INSTALL.md",
+    "config",
+    "lib"
   ],
   "dependencies": {
     "acorn": "^8.18.0"

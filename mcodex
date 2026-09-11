@@ -33,7 +33,21 @@
 
 set -euo pipefail
 
-QUOTA_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Resolve the real path of this script, following symlinks. mcodex is often
+# installed as `ln -s <repo>/mcodex ~/.minimax/bin/mcodex`, and
+# BASH_SOURCE[0] returns the symlink path, not the project root. Without
+# resolving, every relative path below (lib/, patches/, mcodex-status) would
+# be wrong.
+SOURCE="${BASH_SOURCE[0]}"
+while [[ -L "$SOURCE" ]]; do
+  TARGET="$(readlink "$SOURCE")"
+  if [[ "$TARGET" = /* ]]; then
+    SOURCE="$TARGET"
+  else
+    SOURCE="$(dirname "$SOURCE")/$TARGET"
+  fi
+done
+QUOTA_DIR="$(cd "$(dirname "$SOURCE")" && pwd)"
 CODE_ROOT="${MCODE_CODE_ROOT:-${HOME}/.minimax-code}"
 FORK_BASE="${MCODE_QUOTA_FORK_DIR:-${HOME}/.local/share/mcode-quota/mcode-clone}"
 CONFIG_YAML="${MCODE_CONFIG_YAML:-${HOME}/.minimax/config.yaml}"
@@ -51,11 +65,18 @@ if [[ -z "$CURRENT_VERSION" ]]; then
   exit 1
 fi
 
+# Portable dotted-numeric version sort. `sort -V` is GNU-only and macOS BSD
+# sort only supports it from macOS 15 (Sequoia); this awk form works everywhere.
+vsort() {
+  awk -F. '{ printf "%09d %09d %09d %s\n", $1+0, $2+0, $3+0, $0 }' \
+    | sort \
+    | awk '{ print $4 }'
+}
+
 # 0.4.0 is the first version with the native custom-command status item.
-# sort -V gives a correct dotted-numeric compare (0.10.0 > 0.4.0, unlike sort).
 NATIVE_MIN="0.4.0"
 IS_NATIVE=0
-if [[ "$(printf '%s\n%s\n' "$NATIVE_MIN" "$CURRENT_VERSION" | sort -V | head -n1)" == "$NATIVE_MIN" ]]; then
+if [[ "$(printf '%s\n%s\n' "$NATIVE_MIN" "$CURRENT_VERSION" | vsort | head -n1)" == "$NATIVE_MIN" ]]; then
   IS_NATIVE=1
 fi
 
