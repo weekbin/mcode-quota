@@ -237,6 +237,9 @@ node tests/mcode-smoke.mjs   # 行为回归（87 项）
 [ ] mcodex doctor      -> 0 failures
 [ ] 真实跑一次 mcode   -> 3 行都在，颜色正常
 [ ] 切一次 session     -> 立刻重绘（不等 10s）
+[ ] picker 屏也能看到底栏（v3.3.3+）-> `mcodex-status` 在 !sessionId 时
+    必须仍然输出 3 行（line 1 dim 占位，line 2/3 真实数据），mcodex
+    doctor 验不出这个，必须肉眼跑 `mcode` 看 picker 屏
 ```
 
 ---
@@ -255,6 +258,7 @@ node tests/mcode-smoke.mjs   # 行为回归（87 项）
 | doctor 报 fork 相关 FAIL | fork 半成品 | 删掉 fork 目录，重跑 `mcodex` |
 | 进度条颜色不显示 | 终端不支持 24-bit | 设置 `COLORTERM=truecolor` 或换终端 |
 | 升级后锚点找不到 | mcode 大重构 | §5 重派生 |
+| **`mcode` plain（picker 屏）底栏消失；`mcode -c` 正常** | mcode ≥ 0.4.0 的 `va` StatusLine 渲染规则（`launcher-*:209`）在 custom-command 输出空时**整条底栏**不画（连同 `current-dir` / `model` / `git-branch`）；`mcodex-status` 旧版在 `!sessionId` 时早 return → 整条底栏空。**与 mcode 进程版本、是否重启都无关**——退出所有 mcode 进程后差异仍存在 | 先 `mcodex install` 同步到 ≥ v3.3.3；手工 `echo '{}' \| mcodex-status` 验 3 行（line 1 应是 dim 占位符 `会话 tokens … │ 上下文 … │ 缓存命中 … │ 轮数 …`，line 2/3 是真实 5h·周 / 今日）。**注意 `mcodex doctor` 验不出这个**（doctor 走 `mcode -c` 路径永远带 sessionId） |
 
 ### 4.1 打开诊断日志
 

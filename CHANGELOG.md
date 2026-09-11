@@ -4,29 +4,51 @@
 
 ## 2026-09-11 — v3.3.3：修 `mcodex-status` 无 sessionId 时整条底栏消失
 
-mcode ≥ 0.4.0 的 `va` StatusLine 渲染逻辑（`launcher-U2WCORIY.js:209` 与
-0.4.0 同样位置逐字相同）：
+### 根因（一句话）
+
+mcode 0.4.x 的 `va` StatusLine 渲染器在 custom-command 输出为空时，连
+同所有 regular items（current-dir / model / git-branch 等）一起不画底
+栏；`mcodex-status` 旧版在 `!sessionId` 时早 return 输出空 → picker /
+welcome 屏整条底栏消失 → 用户看到 `mcode` 跟 `mcode -c` 行为不同，**实
+际上跟 mcode 二进制版本、重启与否都无关，纯是 `mcodex-status` 的
+sessionId 短路问题**。
+
+### mcode 0.4.x 的渲染约束
+
+`launcher-*:209`（0.4.0 和 0.4.1 位置 + 逻辑逐字相同）：
 
 ```js
 return u.length===0 && l.length===0 ? [] : ...;
 ```
 
-——**只要 custom-command 那块没输出，连同所有 regular items（current-dir /
-model / git-branch 等）整条底栏一起不画**。
+`u` 是 regular items 拼出来的行；`l` 是 custom-command 块。**custom 空
++ regular 也空 → 整条底栏 `[]`**。这条规则让 `mcodex-status` 一旦没
+输出，连 `current-dir` / `model` / `git-branch` 都被一起吞掉。
 
-旧 `mcodex-status` 在 `!sessionId` 时早 return（注释："transient rows
-are not worth the flicker"）—— 假设 mcode < 0.4.0 没有 statusline
-概念、picking 屏本就不画底栏。**但 mcode ≥ 0.4.0 的策略反了**：picker
-屏 / welcome 屏仍然画底栏，只是不画 custom block；custom block 空 → 整
-条底栏不渲染 → 用户看到的是"无 session 时底栏消失"，而 `mcode -c` /
-进入 active session 后底栏才出现，看起来像 `mcode` 与 `mcode -c` 行为不
-同，其实是同一个机制在两种 session 状态下的表现不同。
+### 真正错过的两条推断（事后总结）
 
-修复链路经过两轮迭代：
+排障过程里走偏过两次，写下来留底：
 
-**v3.3.3a — `mcodex-status` 在 `!sessionId` 时调用 `collect({ sessionId: "" })`**，
-而不是早 return。`collect` 数据层已经具备"部分数据可独立于 sessionId 获
-取"的能力：
+1. **错路 1：「老 0.4.0 TUI 没关，mcode 进程版本还是 0.4.0」** — 当时看
+   到 `ps` 里同时有 `minimax-code` 0.4.0 和 0.4.1 两个进程，假设是
+   `current` 指针切到 0.4.1 后老 TUI 没自动切。**事后回看跟这个问题无
+   关**：用户后来明确退出所有进程后，`mcode` vs `mcode -c` 的差异仍然
+   存在，所以不是进程版本问题。
+2. **错路 2：「`mcodex-status` 早 return，注释里写了 picker 屏就该静
+   默」** — 这是真根因的一部分，但当时把这个当 feature 而不是 bug，没
+   有把"5h/周 和 今日**不**需要 sessionId"这件事拆开看，把那两行也写
+   成了 "row waiting" 占位（v3.3.3a 那次），等于扔掉了本来能拿到的
+   实时数据。
+
+### 修复链路（按 commit 顺序）
+
+| commit | 改法 | 状态 |
+|---|---|---|
+| `3a553e9` | `!sessionId` 时输出 1 行 `ws │ model` | 太瘦，仍像 "bar 坏了" |
+| `d1af1b3` | 改 3 行 ANSI dim 骨架屏（5h/周 + 今日也写成 "row waiting"） | **被覆盖**：把不需要 sessionId 的数据也遮蔽了 |
+| `0da7806` | 让 `!sessionId` 走 `collect({ sessionId: "" })`；`fetchSessionTotals` / `fetchContext` 已有的 `!sessionId → null` 短路让 4-chunk 行变 placeholder；`fetchTodayByModel` / `fetchQuota` 不需要 sessionId，自然拿到真实数据 | **最终方案** |
+
+### 4 个数据源对 sessionId 的依赖关系（重要）
 
 | 数据源 | 需要 sessionId | 原因 |
 |---|---|---|
@@ -35,13 +57,13 @@ are not worth the flicker"）—— 假设 mcode < 0.4.0 没有 statusline
 | `fetchTodayByModel(db, cacheDir)` | ✗ | 跨 session 聚合（SQLite aggregate） |
 | `fetchQuota(cacheDir)` | ✗ | 走 mmx CLI + 本地 cache |
 
-旧 `fetchSessionTotals` / `fetchContext` 已有 `if (!db \|\| !sessionId) return null`
-短路；`fetchTodayByModel` / `fetchQuota` 不需要 sessionId。**所以让
-`collect({ sessionId: "" })` 走完整路径，自然拿到 quota + today，
-session/context 是 null，被 `buildStatusLines` 现有的 placeholder
-逻辑渲染成"会话 tokens … │ 上下文 … │ 缓存命中 … │ 轮数 …"**。
+旧 `fetchSessionTotals` / `fetchContext` 早就写了 `if (!db \|\| !sessionId) return null` 短
+路；`fetchTodayByModel` / `fetchQuota` 不需要 sessionId。所以 `collect({ sessionId: "" })`
+走完整路径自然拿到 quota + today，session/context 是 null，被
+`buildStatusLines` 现有的 placeholder 逻辑渲染成"会话 tokens … │ 上
+下文 … │ 缓存命中 … │ 轮数 …"。
 
-效果：
+### 效果
 
 | 启动 | sessionId | 4-chunk 行 | 5h/周 行 | 今日 行 |
 |---|---|---|---|---|
@@ -51,56 +73,16 @@ session/context 是 null，被 `buildStatusLines` 现有的 placeholder
 
 不再有"picker 屏底栏消失"或"mcode vs mcode -c 行为不同"的现象。
 
-**v3.3.3b（被 v3.3.3a 覆盖）** — 早期的"3 行 ANSI dim 骨架屏"方案不再需
-要：它把 5h/周 和 今日 那两行也写成"waiting"，但实际上 quota + today
-的实时数据任何时间都能拿到，骨架屏反而遮蔽了信息。已删除。
+### 验收方式
 
-## 2026-09-11 — v3.3.2：新增 `mcodex-status-compact`，窄屏 1 行变体
+`mcodex doctor` 不能验这个（它走 `mcode -c` 路径，永远带 sessionId）。
+验证只能靠肉眼：
 
-mcode ≥ 0.4.0 的 `va` StatusLine 渲染逻辑（`launcher-U2WCORIY.js:209` 与
-0.4.0 同样位置逐字相同）：
-
-```js
-return u.length===0 && l.length===0 ? [] : ...;
-```
-
-——**只要 custom-command 那块没输出，连同所有 regular items（current-dir /
-model / git-branch 等）整条底栏一起不画**。
-
-旧 `mcodex-status` 在 `!sessionId` 时早 return（注释："transient rows
-are not worth the flicker"）—— 假设 mcode < 0.4.0 没有 statusline
-概念、picking 屏本就不画底栏。**但 mcode ≥ 0.4.0 的策略反了**：picker
-屏 / welcome 屏仍然画底栏，只是不画 custom block；custom block 空 → 整
-条底栏不渲染 → 用户看到的是"无 session 时底栏消失"，而 `mcode -c` /
-进入 active session 后底栏才出现，看起来像 `mcode` 与 `mcode -c` 行为不
-同，其实是同一个机制在两种 session 状态下的表现不同。
-
-修复（`mcodex-status`）：
-
-```diff
-   if (!sessionId) {
--    return;   // 旧:picker 屏整条底栏消失
-+    // 新:无 session 时仍输出 1 行 fallback,让 mcode 的 va.render() 看到
-+    // customStatusText 非空,继续渲染底栏(以及 current-dir / model 等
-+    // regular items)
-+    const ws  = (payload.workspace_dir||"").replace(/\/+$/,"").split("/").pop()||"";
-+    const mdl = (payload.model||"").split("/").pop()||"";
-+    const parts = [ws, mdl].filter(Boolean);
-+    if (parts.length===0) return;
-+    process.stdout.write(parts.join(" │ ") + "\n");
-+    return;
-   }
-```
-
-效果：
-
-| 启动 | sessionId | `mcodex-status` 输出 | 底栏 |
-|---|---|---|---|
-| `mcode` plain（picker） | 无 | `mcode │ MiniMax-M3`（1 行 fallback） | 可见 |
-| `mcode -c`（续会话） | 有 | 3 行块（4-chunk + 5h·周 + 今日） | 可见 |
-| `mcode` 之后选了空 session | 无 | 同上 fallback | 可见 |
-
-不再有 `mcode` 与 `mcode -c` 的底栏行为差异。
+1. 退出所有 mcode 进程（`pkill -f minimax-code`）
+2. 跑 `mcode`，看 picker 屏底栏
+3. 期望：3 行都可见，line 1 是 dim 占位符，line 2/3 是真实数据
+4. 跑 `mcode -c`（或正常启动后等 session 加载），看 active TUI 底栏
+5. 期望：3 行都可见，全部是真实数据
 
 ## 2026-09-11 — v3.3.2：新增 `mcodex-status-compact`，窄屏 1 行变体
 
