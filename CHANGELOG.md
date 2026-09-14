@@ -2,6 +2,32 @@
 
 记录每次对工具集的修改。新条目加在最上面。
 
+## 2026-09-14 — v3.4.3：5h·周 配额 TTL 从 60s 提到 5min
+
+`fetchQuota` 默认 `QUOTA_TTL_MS = 60_000`（1 分钟），`mcodex-status` 在 mcode
+0.4.x 下每 `intervalSeconds`（默认 10s）被调一次 → `mmx quota show` 平均
+**每 60s 启动一次**，每 10 分钟 10 次进程 spawn + JSON 解析 + 磁盘写。
+
+5h 滚动窗口的"剩余百分比"以分钟级变化，"重置时间"以秒级变化但只显示
+到分钟（看 `fmtReset`），周限制以小时级变化。1 分钟粒度对用户视觉无意义，
+`mmx` 启动开销（独立 node 进程、JSON 解析、磁盘 I/O）却是真实的。
+
+修法（`lib/data.mjs`）：
+
+- 默认 `QUOTA_TTL_MS`: `60_000` → **`300_000`**（5 分钟）
+- 用户仍可经 `MCODE_QUOTA_TTL_MS` 环境变量覆盖（要 1 分钟粒度就
+  `MCODE_QUOTA_TTL_MS=60000 mcodex` 启动）
+- statusline 自身的 10s 刷新率不变 —— 5 分钟内 `mmx` 都不重启，只是从
+  cache 读旧值；剩余百分比 / 重置时间显示得"过时"是 5 分钟内的 cache
+  快照
+
+| 指标 | 60s TTL | 5min TTL |
+|---|---|---|
+| `mmx quota show` 启动频次（statusline 10s/次） | 6 次/分钟 | 1 次 / 5 分钟 |
+| statusline 5h·周 行新数据延迟 | ≤ 1 分钟 | ≤ 5 分钟（视觉无感） |
+
+`mcodex doctor` 仍 17/17,无 regression。
+
 ## 2026-09-14 — v3.4.2：修"轮数"算法 — 改用 `local_runtime_message_rows` user 计数，剔除 mcode 内部 warmup turn
 
 `fetchSessionTotals` 里的 turns 字段一直用 `COUNT(DISTINCT turn_id)
