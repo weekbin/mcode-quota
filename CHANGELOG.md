@@ -2,6 +2,44 @@
 
 记录每次对工具集的修改。新条目加在最上面。
 
+## 2026-09-14 — v3.4.1：`fetchTodayByModel` warm 路径加 TTL early-return，picker 屏不再每 10s 扫 58K 行
+
+`mcodex-status` 在 mcode 0.4.x 下被 `customStatusLine` runner 每 `intervalSeconds` 调一次（默认 10s）。
+v3.3.3 修 picker 屏底栏时把"无 sessionId 时早 return"改成了"走 `collect()` 完整路径"，
+fetchTodayByModel 因此会在 picker 屏每 10s 触发一次。
+
+旧路径在 warmed 之后仍然每次重扫整张 `local_runtime_token_usage` 当天表（58K+ 行）
++ 在 JS 里重聚 + 原子写一次 `today-by-model.json` cache。`mcode-quota-doctor` 验
+不出，但用户实测能感觉到 picker 屏每 10s 一次的 lag。
+
+修法（`lib/data.mjs` 的 `fetchTodayByModel`）：
+
+- warmed 增量分支先查 `local_runtime_message_rows` 的新行（已经够快）
+- 新行 == 0 **且** `Date.now() - state.fetchedAt < TODAY_STATE_TTL_MS` **且** `state.items.length > 0`
+  → 直接 `return state.items`，跳过整张 token 表扫描、JS 重聚、cache 写盘
+
+性能（58262 行 / 24 列 v3.3.0 起表结构，本机实测）：
+
+| 路径 | 修前 | 修后 |
+|---|---|---|
+| 冷启动（cache 清空） | 52ms | 52ms（不变，全表扫 + 写盘必要） |
+| 暖 + 60s 内 | 1-2ms + 58K-row scan + 写盘 | **0-1ms**（直接 return） |
+| 暖 + 跨 60s TTL | 1-2ms + 58K-row scan + 写盘 | 同上（仍重算 + 写盘，因为 TTL 过期） |
+
+`mcodex doctor` / `mcodex status` 走 17/17，无 regression。
+
+顺手记下"轮数"算法的语义（用户问过是不是慢了 / 对不对）：
+
+- `fetchSessionTotals` 里的 turns = `COUNT(DISTINCT turn_id) FROM local_runtime_token_usage WHERE session_id = ?`
+- 一个 turn 在 mcode 内部有 1 个 `turn_id`，但在 `local_runtime_token_usage` 里**平均 ~9.75 row**
+  （多 agent / 多 tool-call / 多次 record，所以行数 != turn 数）
+- 用 `DISTINCT turn_id` 是正确语义：每轮 1 次计入
+- 用 `COUNT(*)` 会多算（9.75× 偏差），不是 bug 修复对象
+- 这个 SQL 走 `idx_local_runtime_token_usage_session_ts` 索引，< 1ms
+- v3.3.3 之前 picker 屏的"快"错觉来自"无 sessionId 时 `mcodex-status` 早 return"，
+  实际不是 4-chunk 算得慢，是 SQL 路径根本没跑——这跟本修复**无关**，
+  v3.3.3 修复本身的 picker 路径现在 0-1ms warmed 命中
+
 ## 2026-09-11 — v3.4.0：开始 deprecate `mcodex` 启动 wrapper
 
 mcode ≥ 0.4.0（v3.3.0 起 native `tui.customStatusLine` 路径）以后
