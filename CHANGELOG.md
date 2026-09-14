@@ -2,6 +2,54 @@
 
 记录每次对工具集的修改。新条目加在最上面。
 
+## 2026-09-14 — v3.4.2：修"轮数"算法 — 改用 `local_runtime_message_rows` user 计数，剔除 mcode 内部 warmup turn
+
+`fetchSessionTotals` 里的 turns 字段一直用 `COUNT(DISTINCT turn_id)
+FROM local_runtime_token_usage WHERE session_id = ?` —— 也就是"该
+session 里消耗过 token 的 turn 数"。**这不是用户预期的"轮数"**。
+
+mcode 0.4.x 的 `pi-agent` framework 在某些 session 里会**额外写一个
+`turn_id` 进去**：
+
+- 这个 turn 在 `local_runtime_token_usage` 里有 2 行（典型 ~700 output
+  + 228K cache_read tokens）
+- 在 `local_runtime_message_rows` 里**只有 `assistant` role，没有
+  `user` role**（`role='user'` distinct turn_id = 0）
+- 看起来是 pi-agent 内部 warmup / thinking-only continuation / 初始化
+  summary，**不是用户触发的轮**
+
+实测对照（8 个最近 session）：
+
+| session | token_turns | user_turns | 差异 |
+|---|---|---|---|
+| mvs_9ab7f891... (active) | 21 | 20 | **+1 warmup** |
+| mvs_bcde8b0e... | 8 | 7 | **+1 warmup** |
+| mvs_11ded2aa... | 5 | 5 | 一致 |
+| mvs_90e6386... | 5 | 5 | 一致 |
+| mvs_2d66e253... | 11 | 11 | 一致 |
+| 其它 3 个 | 1 | 1 | 一致 |
+
+8 个里 2 个有 +1 warmup 异常（25%），但 user 视角**永远**只有 20 / 7 个
+prompt。
+
+修法（`lib/data.mjs:fetchSessionTotals`）：
+
+- 主路径：`SELECT COUNT(DISTINCT turn_id) FROM local_runtime_message_rows
+  WHERE session_id = ? AND role = 'user' AND turn_id IS NOT NULL`
+  —— 走 `idx_local_runtime_message_rows_session_role_id` 索引，< 1ms
+- Fallback：user_turns == 0 时（session 刚启动、message 表还没记录）退回
+  到原 token_turns，避免短暂显示 0
+
+效果：
+
+| 启动类型 | 修前 | 修后 |
+|---|---|---|
+| 当前 session（warmup 异常） | 轮数 21 | **轮数 20**（= 用户实际 prompt 数） |
+| 正常 session（一致） | 轮数 N | 轮数 N（不变） |
+| 极早期 session（message 表空） | 轮数 N | 轮数 max(user, token)（fallback） |
+
+`mcodex doctor`: 17/17 仍 ok，无 regression。
+
 ## 2026-09-14 — v3.4.1：`fetchTodayByModel` warm 路径加 TTL early-return，picker 屏不再每 10s 扫 58K 行
 
 `mcodex-status` 在 mcode 0.4.x 下被 `customStatusLine` runner 每 `intervalSeconds` 调一次（默认 10s）。
