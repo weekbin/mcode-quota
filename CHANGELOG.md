@@ -2,6 +2,48 @@
 
 记录每次对工具集的修改。新条目加在最上面。
 
+## 2026-09-14 — v3.4.4：刷新率原则 — 远程节流、本地实时
+
+把"哪些数据源该节流、哪些不该"显式写进 `lib/data.mjs` 顶部注释,作为
+今后调整 TTL 的判定标准。
+
+**原则**:
+- **远程 API** (mmx CLI / 网络) — 3-5min 节流,数据本身以分钟/小时变化,
+  频于其变化率的查询只是进程开销
+- **本地 sqlite** — 尽量实时。`local_runtime_message_rows` /
+  `local_runtime_token_usage` 按 turn_id 同步追加,增量扫描
+  `id > lastId` 是主键范围 SEARCH(sub-ms),无新行就 0 写盘
+
+**代码改动** (`lib/data.mjs`):
+
+`fetchTodayByModel` warmed 路径去掉 60s `TODAY_STATE_TTL_MS` 限制:
+
+- 改前: warmed + `rows.length === 0` 时,若 `fetchedAt` 距今 < 60s 则
+  return 缓存(否则全表扫 + 写盘) — today 数据最差 stale 60s
+- 改后: warmed + `rows.length === 0` **直接** return 缓存,无 TTL
+  条件。无新 message row = 无新 token_usage row(schema 同步保证),
+  cached items 必然仍准,0 写盘、0 全表扫。下一条 message row 出现
+  的下一个 10s tick 就会反映出来
+
+冷启动路径(`!state.warmed` 或 schema 无 monotonic `id`)仍保留
+60s 兜底,因为这条路径要全表扫 ~58K rows,每次 10s tick 都跑会卡。
+
+`fetchSessionTotals` / `fetchContext` 本来就 0 缓存每次查,已是实时。
+`fetchQuota` 5min TTL 不变,符合"远程节流"。
+
+**实测**:
+
+| 场景 | 改前 | 改后 |
+|---|---|---|
+| 10s tick,无新 turn | 60s 内 return;60s 边界外重跑 58K 全表扫 + 写盘 | warmed 后永远 0 写盘,只跑 1 次 `SELECT id WHERE id>lastId`(主键 SEARCH) |
+| 出现新 turn | 下一个 60s 边界才反映 | 下一个 10s tick 反映 |
+| 冷启动 | 全表扫一次 → warmed | 不变 |
+
+`mcodex doctor` 仍 17/17。注意 `tests/parity.mjs` 和
+`tests/mcode-smoke.mjs` 期望 `sidecar/mcode-quota-fetcher-9f8a7b.mjs`
+和 `patches/0.3.11/`,这两个路径只存在于 legacy fork(< 0.4.0)安装,
+native 路径(0.4.0+)下不生成 — 不是 regression,跟 v3.4.4 无关。
+
 ## 2026-09-14 — v3.4.3：5h·周 配额 TTL 从 60s 提到 5min
 
 `fetchQuota` 默认 `QUOTA_TTL_MS = 60_000`（1 分钟），`mcodex-status` 在 mcode
