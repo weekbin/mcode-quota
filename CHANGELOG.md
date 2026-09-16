@@ -2,6 +2,29 @@
 
 记录每次对工具集的修改。新条目加在最上面。
 
+## 2026-09-16 — v3.4.5：缓存命中百分比改两位小数
+
+`缓存命中` 字段之前是 `Math.round` 整数（`99%`）。改成 `toFixed(2)` 两位小数
+（`99.14%` / `98.75%`），让用户在 90-99% 这段高频区间看到真实的小数波动。
+
+**改动**:
+- `lib/render.mjs` — `Math.round(p)` → `p.toFixed(2)`
+- `mcode-quota/sidecar/mcode-quota-fetcher-9f8a7b.mjs` — 同上(parity 锁定)
+- `patches/0.3.10/mcode-patch-quota.mjs` — 同上(0.3.x fork)
+- `patches/0.3.11/mcode-patch-quota.mjs` — 同上(0.3.x fork)
+
+颜色阈值(`>= 90` deep green / `>= 70` muted green)仍用原始浮点比较,不受
+取整方式影响。
+
+**验证**:
+- `tests/parity.mjs` — 18 个宽度全部 byte-identical(legacy sidecar vs native)
+- `tests/mcode-smoke.mjs` — 87/87 pass
+- 窄屏(width=40 / 60): 自动剔除多余 chunk 行为不变
+- `cacheHit: 0.9875` 渲染输出:`缓存命中 98.75%`
+
+**注意**:整数命中率现在会显示成 `99.00%`(而不是 `99%`),每行多占 ~3 字符;
+若要"非零就显示小数、整数就省略"的智能裁切,后续单独处理。
+
 ## 2026-09-14 — v3.4.4：刷新率原则 — 远程节流、本地实时
 
 把"哪些数据源该节流、哪些不该"显式写进 `lib/data.mjs` 顶部注释,作为

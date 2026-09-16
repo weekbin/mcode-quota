@@ -380,13 +380,13 @@ function renderContextChunk() {
   return label(L_CONTEXT) + " " + ESC + col + "m" + c.pct + "%" + RESET_SEQ + " " + amount;
 }
 
-// Cache hit rate: how much of the prompt was served from the prompt cache.
+// Cache hit rate: how much of the prompt was served from the prompt cache (2 decimals).
 // ≥90% deep green, ≥70% muted green, otherwise amber.
 function renderCacheHitChunk() {
   if (!session.valid || session.cacheHit == null) return null;
   const pct = session.cacheHit * 100;
   const col = pct >= 90 ? C_SUCCESS : pct >= 70 ? "38;2;140;170;90" : C_WARNING;
-  return label(L_HIT) + " " + ESC + col + "m" + Math.round(pct) + "%" + RESET_SEQ;
+  return label(L_HIT) + " " + ESC + col + "m" + pct.toFixed(2) + "%" + RESET_SEQ;
 }
 
 // Number of distinct turns in this session.
