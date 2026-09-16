@@ -24,6 +24,7 @@
 
 import { buildStatusLines } from "./lib/render.mjs";
 import { collect, DEFAULT_DB } from "./lib/data.mjs";
+import { loadMcodexOptions } from "./lib/options.mjs";
 
 const DEBUG = process.env.MCODEX_STATUS_DEBUG === "1";
 const log = (m) => { if (DEBUG) process.stderr.write("[mcodex-status] " + m + "\n"); };
@@ -84,7 +85,16 @@ async function main() {
 
   let lines = [];
   try {
-    lines = buildStatusLines(state, width());
+    // Per-category visibility + tailMode/decimals come from `tui.mcodex` in
+    // ~/.minimax/config.yaml. Re-read every tick so toggles take effect on
+    // the next 10s interval without restarting mcode.
+    let opts = {};
+    try {
+      opts = loadMcodexOptions();
+    } catch (e) {
+      log("options load failed: " + (e && e.message));
+    }
+    lines = buildStatusLines(state, width(), opts);
   } catch (e) {
     log("render failed: " + (e && e.stack || e));
     return;

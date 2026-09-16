@@ -95,14 +95,16 @@ native_apply() {
   local out
   if [[ "$mode" == "remove" ]]; then
     out="$("$NODE_BIN" --input-type=module -e "
-      import { removeStatuslineConfig } from '${QUOTA_DIR}/lib/config-apply.mjs';
-      const r = removeStatuslineConfig('${CONFIG_YAML}');
-      console.log(JSON.stringify(r));
+      import { removeStatuslineConfig, removeMcodexOptions } from '${QUOTA_DIR}/lib/config-apply.mjs';
+      const r1 = removeStatuslineConfig('${CONFIG_YAML}');
+      const r2 = removeMcodexOptions('${CONFIG_YAML}');
+      console.log(JSON.stringify({ statusline: r1, mcodex: r2 }));
     " 2>&1)" || { echo "mcodex: config edit failed: $out" >&2; return 1; }
   else
     out="$("$NODE_BIN" --input-type=module -e "
       import { applyStatuslineConfig } from '${QUOTA_DIR}/lib/config-apply.mjs';
-      const r = applyStatuslineConfig('${CONFIG_YAML}', {
+      import { applyMcodexOptions } from '${QUOTA_DIR}/lib/config-apply.mjs';
+      const r1 = applyStatuslineConfig('${CONFIG_YAML}', {
         command: '${STATUS_BIN}',
         maxLines: 3,
         intervalSeconds: 10,
@@ -110,7 +112,8 @@ native_apply() {
         position: 'below',
         colorMode: 'ansi',
       });
-      console.log(JSON.stringify(r));
+      const r2 = applyMcodexOptions('${CONFIG_YAML}', {});
+      console.log(JSON.stringify({ statusline: r1, mcodex: r2 }));
     " 2>&1)" || { echo "mcodex: config edit failed: $out" >&2; return 1; }
   fi
 
@@ -131,12 +134,34 @@ native_status() {
      && grep -q "custom-command" "$CONFIG_YAML" 2>/dev/null; then
     applied="yes"
   fi
+  # Read the tui.mcodex block via lib/options.mjs so the display always matches
+  # what mcodex-status will actually render on the next tick.
+  local opt_json=""
+  if [[ -f "$CONFIG_YAML" ]]; then
+    opt_json="$("$NODE_BIN" --input-type=module -e "
+      import { loadMcodexOptions } from '${QUOTA_DIR}/lib/options.mjs';
+      const o = loadMcodexOptions('${CONFIG_YAML}');
+      const fmt = (b) => b ? 'on' : 'off';
+      console.log(JSON.stringify({
+        row4chunks: fmt(o.enabled.row4chunks),
+        quotaRow:   fmt(o.enabled.quotaRow),
+        todayRow:   fmt(o.enabled.todayRow),
+        tailMode:   o.tailMode,
+        decimals:   o.decimals,
+      }));
+    " 2>/dev/null || echo "")"
+  fi
   echo "mcodex status"
   echo "  mcode version   : ${CURRENT_VERSION}"
   echo "  strategy        : native custom-command (no fork, no patching)"
   echo "  config          : ${CONFIG_YAML}"
   echo "  config applied  : ${applied}"
   echo "  status command  : ${STATUS_BIN}"
+  if [[ -n "$opt_json" ]]; then
+    echo "  visible rows    : $(echo "$opt_json" | "$NODE_BIN" -e "const o=JSON.parse(require('fs').readFileSync(0,'utf8'));console.log(\`row4chunks=\${o.row4chunks} quotaRow=\${o.quotaRow} todayRow=\${o.todayRow}\`)")"
+    echo "  tailMode        : $(echo "$opt_json" | "$NODE_BIN" -e "console.log(JSON.parse(require('fs').readFileSync(0,'utf8')).tailMode)")"
+    echo "  cache decimals  : $(echo "$opt_json" | "$NODE_BIN" -e "console.log(JSON.parse(require('fs').readFileSync(0,'utf8')).decimals)")"
+  fi
   echo "  note            : plain 'mcode' shows the rows too — mcodex is not required at runtime"
 }
 

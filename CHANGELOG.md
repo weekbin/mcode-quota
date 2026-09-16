@@ -2,6 +2,64 @@
 
 记录每次对工具集的修改。新条目加在最上面。
 
+## 2026-09-16 — v3.4.6：状态栏改造 — category registry + `tui.mcodex` 配置面板
+
+把"哪些行渲染"从硬编码搬进一个统一的入口 —— `ROW_CATEGORIES` registry
++ 用户在 `~/.minimax/config.yaml` 里的 `tui.mcodex` 块。三个原本散在
+`buildStatusLines` 里的 row（4-chunk / 配额 / 今日）现在各自是一个
+`{id, render}` 注册项；`buildStatusLines(state, width, opts)` 按
+`opts.enabled[id]` 过滤、按 registry 顺序输出。
+
+**新 schema**（写在 `tui:` 下，与 `customStatusLine` 同级）：
+
+```yaml
+tui:
+  mcodex:
+    enabled:
+      row4chunks: true       # 会话 tokens │ 上下文 │ 缓存命中 │ 轮数
+      quotaRow:   true       # 小时会话窗口 │ 周限制使用量
+      todayRow:   true       # 今日 per-model
+    tailMode:    auto        # auto | full | compact
+    decimals:    2           # 缓存命中保留的小数位（0..4）
+```
+
+- 缺 block → 全部默认 true（与 v3.4.5 之前的渲染完全一致，向后兼容）
+- 缺某 key → 默认 true
+- `tailMode` 与 `MCODE_QUOTA_TAIL` 环境变量并存（env 优先）
+- `decimals` 把 v3.4.5 引入的 toFixed 改成可配（0 = 回到 v3.4.4 之前的整数）
+
+**改动**:
+- `lib/render.mjs` — 新增 `ROW_CATEGORIES` / `DEFAULT_ENABLED`,
+  `buildStatusLines(state, width, opts)` 按 registry walk;
+  `renderCacheHitChunk(session, opts)` 加 `decimals` 参数
+- `lib/options.mjs` — **新**。手卷 YAML 解析器读 `tui.mcodex` 块,
+  容错(任何错误回默认值),10s tick 每次重新读
+- `lib/config-apply.mjs` — 新增 `applyMcodexOptions` /
+  `removeMcodexOptions`(idempotent, byte-stable, 复用现有 line-edit
+  primitives)
+- `mcodex-status` — 启动时 `loadMcodexOptions()`,把 opts 喂给
+  `buildStatusLines`
+- `mcodex` wrapper — `install` 默认写 `tui.mcodex` block(完整 schema 落地,
+  用户看到的就是文档里的样子);`uninstall` 同时 `removeMcodexOptions`;
+  `status` 新增 `visible rows / tailMode / cache decimals` 三行
+- `config/0.4.0/tui.statusline.yaml` — 文档加 `tui.mcodex` 块 + 注释
+
+**legacy 路径**:不动 `patches/0.3.{10,11}/` 也不动 `mcode-quota/sidecar/`。
+`tests/parity.mjs` 在默认状态(全部 enabled、decimals=2)下仍 18 个宽度
+byte-identical;legacy fork 用户不读 `tui.mcodex`,行为不变。
+
+**验证**:
+- `tests/parity.mjs` — 19/19(默认状态 byte-identical)
+- `tests/mcode-smoke.mjs` — 106/106(新增 19 项 enabled / decimals / options
+  round-trip 测试)
+- 端到端:`mcodex-status` 读真实 `~/.minimax/config.yaml`,toggle 生效在
+  下一个 10s tick
+
+**注意**: 用户写错 `tui.mcodex.*` 不会被报错,而是回默认值(silent
+fallback)。例如 `decimals: 99` 会取 2,`tailMode: bogus` 取 `auto`,
+`enabled.row4chunks: maybe` 取 true。设计上"宁可渲染,不要报错" —
+底栏挂掉比显示错误更糟。
+
 ## 2026-09-16 — v3.4.5：缓存命中百分比改两位小数
 
 `缓存命中` 字段之前是 `Math.round` 整数（`99%`）。改成 `toFixed(2)` 两位小数

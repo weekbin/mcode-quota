@@ -50,3 +50,14 @@ tui:
     intervalSeconds: 10
     timeoutMs: 5000
     colorMode: ansi
+  mcodex:                    # <- mcodex 写入（可选；整段可删）
+    # 每个 chunk 是否显示。缺省 / 不识别 = true。
+    # 关闭后整行从底栏移除，渲染器不会再尝试压缩 / 占位。
+    enabled:
+      row4chunks: true       # 会话 tokens │ 上下文 │ 缓存命中 │ 轮数
+      quotaRow: true         # 小时会话窗口 │ 周限制使用量
+      todayRow: true         # 今日 per-model
+    # 4-chunk 行的详情折叠策略（同 MCODE_QUOTA_TAIL 环境变量，env 优先）。
+    tailMode: auto           # auto | full | compact
+    # 缓存命中保留的小数位（0..4）。0 = 整数（v3.4.4 之前的行为）。
+    decimals: 2

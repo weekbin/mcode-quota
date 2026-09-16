@@ -546,6 +546,70 @@ try {
       const lines60 = buildStatusLines(st, 60).map(stripAnsi);
       check(lines60.length >= 3, `narrow render still emits ≥3 rows (got ${lines60.length})`);
       check(lines60.every((l) => stripAnsi(l).length <= 200), "narrow rows stay within budget-ish");
+
+      // v3.4.6 — category registry: each row can be turned off independently
+      const offRows = buildStatusLines(st, 200, { enabled: { row4chunks: false } }).map(stripAnsi);
+      check(offRows.length === 2 && !offRows.some((l) => l.includes("会话 tokens")),
+        "row4chunks: false drops the 4-chunk row",
+        offRows.join(" / "));
+      const offQuota = buildStatusLines(st, 200, { enabled: { quotaRow: false } }).map(stripAnsi);
+      check(offQuota.length === 2 && !offQuota.some((l) => l.includes("小时会话窗口")),
+        "quotaRow: false drops the 5h/周 rows",
+        offQuota.join(" / "));
+      const offToday = buildStatusLines(st, 200, { enabled: { todayRow: false } }).map(stripAnsi);
+      check(offToday.length === 2 && !offToday.some((l) => l.includes("今日")),
+        "todayRow: false drops the per-model row",
+        offToday.join(" / "));
+      const offAll = buildStatusLines(st, 200, {
+        enabled: { row4chunks: false, quotaRow: false, todayRow: false },
+      });
+      check(offAll.length === 0, "all categories off emits 0 rows (got " + offAll.length + ")");
+
+      // v3.4.6 — decimals option controls cache hit fraction digits
+      const intRows = buildStatusLines(st, 200, { decimals: 0 }).map(stripAnsi);
+      check(intRows[0].includes("缓存命中 99%"), "decimals: 0 → 整数百分比",
+        intRows[0].slice(0, 80));
+      const oneDec = buildStatusLines(st, 200, { decimals: 1 }).map(stripAnsi);
+      check(oneDec[0].includes("缓存命中 98.8%"), "decimals: 1 → 一位小数",
+        oneDec[0].slice(0, 80));
+      const fourDec = buildStatusLines(st, 200, { decimals: 4 }).map(stripAnsi);
+      check(fourDec[0].includes("缓存命中 98.7500%"), "decimals: 4 → 四位小数",
+        fourDec[0].slice(0, 80));
+      // Out-of-range decimals falls back to default (2)
+      const oor = buildStatusLines(st, 200, { decimals: 99 }).map(stripAnsi);
+      check(oor[0].includes("缓存命中 98.75%"), "decimals out-of-range → defaults to 2",
+        oor[0].slice(0, 80));
+
+      // v3.4.6 — options parser round-trips with applyMcodexOptions
+      const { applyMcodexOptions, removeMcodexOptions } = await import("../lib/config-apply.mjs");
+      const { loadMcodexOptions } = await import("../lib/options.mjs");
+      const optDir = mkdtempSync(join(tmpdir(), "mcodex-opts-"));
+      tempDirs.push(optDir);
+      const workCfg = join(optDir, "options.yaml");
+      writeFileSync(workCfg, "tui:\n  statusLine: []\n");
+      // First apply with defaults writes the block; second apply is no-op.
+      check(applyMcodexOptions(workCfg, {}).changed,
+        "first apply with empty opts writes the default mcodex block");
+      check(!applyMcodexOptions(workCfg, {}).changed,
+        "second apply with empty opts is a no-op (defaults idempotent)");
+      applyMcodexOptions(workCfg, {
+        enabled: { quotaRow: false, todayRow: false }, tailMode: "compact", decimals: 0,
+      });
+      const parsed = loadMcodexOptions(workCfg);
+      check(parsed.enabled.row4chunks === true, "options: unspecified key defaults to true");
+      check(parsed.enabled.quotaRow === false, "options: quotaRow override round-trips");
+      check(parsed.enabled.todayRow === false, "options: todayRow override round-trips");
+      check(parsed.tailMode === "compact", "options: tailMode override round-trips");
+      check(parsed.decimals === 0, "options: decimals override round-trips");
+      // Idempotent on second apply of the same opts
+      check(!applyMcodexOptions(workCfg, {
+        enabled: { quotaRow: false, todayRow: false }, tailMode: "compact", decimals: 0,
+      }).changed, "apply is idempotent on identical opts");
+      // Remove
+      check(removeMcodexOptions(workCfg).changed, "remove strips the mcodex block");
+      check(loadMcodexOptions(workCfg).enabled.row4chunks === true,
+        "after remove, parser returns defaults again");
+      check(!removeMcodexOptions(workCfg).changed, "second remove is a no-op");
     }
   }
 } finally {
