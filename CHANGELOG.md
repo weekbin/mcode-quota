@@ -2,6 +2,23 @@
 
 记录每次对工具集的修改。新条目加在最上面。
 
+## 2026-09-16 — v3.4.9：`mcode-hub-push-remote` 支持 standalone (git根目录) layout
+
+v3.4.7 之前的 push 脚本假设 `mcode-hub-install` 是父 monorepo 的子目录,
+通过 `git subtree split` 抽出。用户的本机 layout 是项目本身就在 git 根
+(`/home/weekbin/orca/projects/mcode/.git` 是唯一 `.git`),parent 路径
+没有 `.git`,脚本直接报错退出。
+
+修法:脚本运行时先探测两种 layout,
+- 父 monorepo (`.git` 在 parent,parent ≠ self) → 走 subtree split
+- standalone (`.git` 在 self,parent 无 `.git`) → 直接 `git fetch self master`
+  到临时 mirror,推远端
+
+push 路径(`-s ours` merge + `gh auth git-credential` helper)不变。
+
+**验证**:推到 `https://github.com/weekbin/mcode-quota.git`,
+`adb71d4..6b1e689 master -> master` fast-forward,5 commit 全上。
+
 ## 2026-09-16 — v3.4.8：质量审计 + 修复 audit 发现的 3 个 defect
 
 跟 v3.4.7 改名一起跑了一遍全量审计:6 个文档、5 个 bash 脚本、4 个 lib
