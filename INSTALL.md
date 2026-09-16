@@ -35,10 +35,10 @@ cd ~/Works/mcode-hub
 mcode                                   # 启动 mcode —— 直接用 mcode 即可
 ```
 
-> **v3.4.0 起 `mcode-hub`(无子命令)是 deprecation 中的 wrapper**——它跟
-> `mcode` 等价(同一份 `cli.js`、同一份 `~/.minimax/config.yaml`)。
-> 装好之后**直接跑 `mcode` 就行**；`mcode-hub` 只在维护场景(装 / 卸 /
-> status / doctor)还有用。完整 roadmap 见 MAINTENANCE.md §10。
+> **v3.4.7 起 wrapper 已删除**。`mcode-hub` 现在只是 mcode spawn 的渲染
+> 脚本。装好之后**直接跑 `mcode` 就行**；维护场景用 `mcode-hub-install` /
+> `mcode-hub-doctor` / `mcode-hub-status-compact` / `mcode-hub-push-remote`。
+> 完整 roadmap 见 MAINTENANCE.md §10。
 
 `mcode-hub-install` auto-detects your mcode layout, builds the shim if
 needed, installs `mmx-cli` for the 5h/周 data source, then runs one
@@ -76,7 +76,7 @@ bootstrap pass:
 | `mcode` (`@minimax-ai/code`) ≥ 0.3.10 | what gets patched | `npm install -g @minimax-ai/code` |
 | `git` | clone mcode-hub + the fork's tarball | Xcode CLT / `brew install git` |
 | `npm` | comes with Node; needed for fork + acorn | bundled with node |
-| `bash` ≥ 3.2 | the wrapper scripts are bash | macOS ships 3.2; Linux has 4+ |
+| `bash` ≥ 3.2 | `mcode-hub-install` is bash (macOS 3.2 compat) | macOS ships 3.2; Linux has 4+ |
 | POSIX tools | `sed`, `grep`, `cmp`, `tr`, `find` (the doctor uses `ls`, not `find -printf`) | preinstalled on every macOS / Linux |
 
 ### Optional (for full quota display)
@@ -267,7 +267,7 @@ working as before.
 |---|---|---|
 | `mcode-hub: quota patcher failed — launching plain mcode` | patcher errored; mcode-hub falls back to vanilla mcode | `MCODE_QUOTA_DEBUG=1 mcode-hub` to see stderr; usually means the shim is missing or acorn is not installed |
 | `Cannot find module 'acorn'` | `npm install` was not run in the project | `cd <project> && npm install` |
-| `Cannot find module '...patches/_loader.mjs'` | `mcode-hub` is a symlink to the project but the old wrapper didn't follow symlinks | upgrade to the version with the F1 fix, or just `cp` instead of `ln -s` for the PATH entry |
+| `Cannot find module '...patches/_loader.mjs'` | `mcode-hub-install` is a symlink in `~/.minimax/bin` but the symlink target was moved | re-run `mcode-hub-install --copy`, or fix the symlink: `ln -link-fs $(realpath <repo>/mcode-hub-install) ~/.minimax/bin/mcode-hub-install` |
 | 5h/周 quota line empty, doctor says "mmx not on PATH" | `mmx-cli` not installed (only happens if you used `--mmx-skip`) | `npm install -g mmx-cli && mmx auth login` |
 | doctor reports a false-positive FAIL on patches/ | old version of doctor; had the `find -printf` bug | upgrade to the version with the F2 fix |
 | `~/.minimax/bin` is not on PATH | shell rc not sourced for this directory | `echo 'export PATH="$HOME/.minimax/bin:$PATH"' >> ~/.zshrc` (or `~/.bashrc`) and `source` it |

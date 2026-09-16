@@ -32,10 +32,10 @@
 mcode                # 启动 mcode —— ≥ 0.4.0 直接用 mcode 即可
 ```
 
-> **v3.4.0 起 `mcode-hub`(无子命令)是 deprecation 中的 wrapper**——它跟
-> `mcode` 等价(同一份 `cli.js`、同一份 `~/.minimax/config.yaml`)。装好
-> 之后**直接跑 `mcode` 就行**；`mcode-hub` 只在维护场景(`install` /
-> `uninstall` / `status` / `doctor`)还有用。完整 roadmap 见
+> **v3.4.7 起 wrapper 已删除**。`mcode-hub` 现在只是 mcode spawn 的渲染
+> 脚本(`tui.customStatusLine.command` 路径)。装好之后**直接跑 `mcode` 就行**;
+> 维护场景用 `mcode-hub-install` / `mcode-hub-doctor` /
+> `mcode-hub-status-compact` / `mcode-hub-push-remote`。完整 roadmap 见
 > [MAINTENANCE.md §10](MAINTENANCE.md#10-mcode-hub-入口-deprecation-路线图v340-起)。
 
 ## mcode 升级时我要做什么

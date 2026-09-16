@@ -480,77 +480,64 @@ mcode 本体从未被修改，卸载后 `mcode` 照常工作。
 
 ---
 
-## 10. `mcode-hub` 入口 deprecation 路线图（v3.4.0 起）
+## 10. `mcode-hub` wrapper 删除史（v3.4.0 → v3.4.7）
 
 mcode ≥ 0.4.0（v3.3.0 起的 native `tui.customStatusLine` 路径）以来，
-mcode-hub **不再 fork mcode 源码**——它只剩两个职责：
+mcode-hub **不再 fork mcode 源码**。剩下的"启动包装"职责只是把 argv
+透传给 mcode——同一份 `cli.js`、同一份 `~/.minimax/config.yaml`,
+是冗余入口。
 
-1. **维护子命令**：`mcode-hub install | uninstall | status | doctor` — 仍然
-   有用，**不** deprecate
-2. **启动包装**：`mcode-hub`（无子命令）/`mcode-hub -c` 调起 mcode — 跟
-   `mcode` / `mcode -c` 完全等价（同一份 `cli.js`、同一份
-   `~/.minimax/config.yaml`），**功能上是冗余入口**
+按 v3.4.0 → v3.4.7 三步退出,**v3.4.7 把 v4.0 的目标提前完成**:
 
-按 v3.4.0 → v4.0.0 三步退出：
+### 10.1 v3.4.0（已发布）
 
-### 10.1 v3.4.0（当前 release）
+- `mcode-hub` 无子命令启动 → stderr 一行 deprecation warning，仍
+  `exec` mcode 不破坏现有用法
+- `--no-deprecation-warning` / `MCODEX_NO_DEPRECATION_WARNING=1` 静默
+- `mcode-hub install | uninstall | status | doctor` 子命令仍静默
+- 文档改以 `mcode` 为主要启动命令
 
-- `mcode-hub` 无子命令启动 → **stderr 一行 deprecation warning**，提醒
-  改用 `mcode`；仍 `exec` mcode 不破坏现有用法
-- `--no-deprecation-warning` 旗标（或 `MCODEX_NO_DEPRECATION_WARNING=1`
-  环境变量）可静默，给需要短期兼容旧脚本/alias 的用户
-- `mcode-hub install | uninstall | status | doctor` 仍静默
-- 文档改以 `mcode` 为主要启动命令；`mcode-hub` 只在维护语境出现
+### 10.2 v3.4.5 — v3.4.6（已发布）
 
-### 10.2 v3.5.0（计划）
+- 缓存命中改两位小数（v3.4.5）
+- 状态栏改造：`ROW_CATEGORIES` registry + `tui.mcodex` 配置面板（v3.4.6）;
+  用户可在 `~/.minimax/config.yaml` 里按行级开关每一类
+- AGENTS.md / ARCHITECTURE.md / INSTALL.md 标注 wrapper 是 deprecation 中
 
-- `mcode-hub-install` **默认不**安装 `~/.minimax/bin/mcode-hub-install` symlink
-  —— `mcode-hub` PATH 入口变成 opt-in（`--with-mcode-hub-wrapper`）
-- 仍提供 `mcode-hub-install --with-mcode-hub-wrapper` 给需要兼容旧
-  muscle memory 的用户（按 `--copy` 安装也可）
-- README / INSTALL / AGENTS 的"快速开始"段移除 `mcode-hub` PATH 入口
-- `mcode-hub` wrapper 脚本本身的 deprecation warning 保留
+### 10.3 v3.4.7（已发布 — 提前完成 v4.0 路线）
 
-### 10.3 v4.0.0（目标）
+**- 删除 `mcode-hub` wrapper 脚本本体**
+- 入口改名：`mcodex-*` → `mcode-hub-*`;`mcodex` wrapper 删
+- 项目名：`mcode-quota` → `mcode-hub`
+- 配置块：`tui.mcodex` → `tui.mcode-hub`
+- `mcode-hub-install` 的 "first run" 改为内联 bootstrap,按 `MCODE_KIND`
+  分流: native 走 `applyStatuslineConfig + applyMcodexOptions`,legacy 走
+  `patches/_loader.mjs`
+- PATH 入口：`~/.minimax/bin/mcode-hub-install`（不再是 wrapper）
+- v3.4.0 §10.5 的 sanity 检查脚本全部作废（没有 wrapper 了）;
+  替代见 §10.4
 
-- 删 `mcode-hub` wrapper 脚本本体
-- 保留独立脚本：`mcode-hub-install`、`mcode-hub`、`mcode-hub-doctor`、
-  `mcode-hub-push-remote`、`mcode-hub-status-compact`
-- `mcode-hub` / `mcode-hub-doctor` 不再以子命令形式存在，要用就
-  单独跑（`./mcode-hub` 而不是 `mcode-hub status`）
-- `mcode` 是唯一的启动命令；`~/.minimax/config.yaml` 里的
-  `tui.customStatusLine` 是唯一的 quota 行接线点
-- `mcode-hub-install` 是唯一需要 PATH 的入口（装好 symlink 后其它脚本
-  直接通过仓库根路径调用即可）
-
-### 10.4 为什么不是 v3.4.0 一步到位
-
-- 0.4.0+ 之后 `mcode-hub` wrapper 仍然承担"确保 config 落盘"这个 safety net：
-  用户从老 release 升上来时，wrapper 的 `native_apply apply` 会把缺失的
-  customStatusLine 键补回 `~/.minimax/config.yaml`，不需要用户手动
-  跑 `mcode-hub install`。直接拿掉 wrapper 会让"刚 mcode update 完没看到
-  状态栏"的用户误以为是 bug
-- 0.4.0 之前的 legacy fork 路径仍在生产使用（虽然本机已全切到 native），
-  wrapper 里的 `IS_NATIVE=0` 分支还需继续工作到最后一个 0.3.x 用户迁移
-- `mcode-hub status` / `mcode-hub doctor` 是文档里大量出现的工具，删 wrapper
-  之前必须先把它们提到独立脚本
-
-### 10.5 自己跑改动前的 sanity 检查
+### 10.4 改动后的 sanity 检查
 
 ```bash
-# mcode-hub 启动会出 deprecation warning
-mcode-hub --help 2>&1 | head -1
-# 期望: mcode-hub: launching via this wrapper is deprecated; ...
+# 主入口存在且可执行
+test -x "$(pwd)/mcode-hub"               || echo FAIL
+test -x "$(pwd)/mcode-hub-install"       || echo FAIL
+test -x "$(pwd)/mcode-hub-doctor"        || echo FAIL
+test -x "$(pwd)/mcode-hub-status-compact"|| echo FAIL
+test -x "$(pwd)/mcode-hub-push-remote"   || echo FAIL
 
-# 静默旗标
-mcode-hub --no-deprecation-warning --help 2>&1 | head -1
-# 期望: Usage: mcode [options] ...（无 warning）
+# 旧 wrapper 不存在
+test ! -e "$(pwd)/mcodex"                || echo FAIL
 
-# 维护子命令不出 warning
-mcode-hub status 2>&1 | grep -i deprecate
-# 期望: 空（不输出 deprecation 行）
+# config 写入仍指向新路径
+grep -q "command:.*mcode-hub$" ~/.minimax/config.yaml || echo FAIL
 
-# doctor 仍绿
-mcode-hub doctor 2>&1 | tail -1
+# 状态栏渲染行数契约（无 session 时 1 行 4-chunk 占位；带 session + quota 时 3 行）
+COLUMNS=200 ./mcode-hub < /dev/null | wc -l   # 期望 ≥ 1
+
+# doctor 全绿
+./mcode-hub-doctor 2>&1 | tail -1
+# 期望: Result: <N> ok, 0 warnings, 0 failures
 # 期望: Result: 17 ok, 0 warnings, 0 failures
 ```

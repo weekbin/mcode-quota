@@ -2,6 +2,72 @@
 
 记录每次对工具集的修改。新条目加在最上面。
 
+## 2026-09-16 — v3.4.8：质量审计 + 修复 audit 发现的 3 个 defect
+
+跟 v3.4.7 改名一起跑了一遍全量审计:6 个文档、5 个 bash 脚本、4 个 lib
+JS 模块。修3 个真缺陷,补 G 段冒烟测试覆盖。
+
+**Defect 1 — `lib/data.mjs` env var 默认值语义错**:
+`process.env.X || DEFAULT` 对 `"0"` 回落到 DEFAULT — TTL 类 env var
+(`MCODE_QUOTA_TTL_MS=0` = "禁用缓存") 就被吞了。改成 `??`:
+- `MCODE_QUOTA_TTL_MS=0` → 真的 TTL=0 (不缓存)
+- `MCODE_QUOTA_TODAY_TTL_MS=0` → 同上
+- `MCODE_QUOTA_MMX_TIMEOUT_MS=0` → 同上
+- `MCODEX_CACHE_DIR` / `MCODE_QUOTA_TAIL` 同样改 `??`
+
+> 注: `??` 只对 null/undefined 回落,空字符串依然保留 —— 这跟 `||`
+> 的差别是空字符串 vs "0"。"0" 在 JS 是 truthy(非空字符串),所以 `||`
+> 会吞它,`??` 不会。对 TTL 这种"0 是合法值"的语义是正确选择。
+
+**Defect 2 — install bootstrap 失败时看不到错误**:
+`mcode-hub-install` 的 first-run bootstrap 走 `node -e "..." >/dev/null
+2>&1`,node 报错被丢。改成 capture stderr to `BOOT_ERR`,失败时把 node
+的报错原样打出来,缩进 4 空格,这样用户能看到真正的 root cause (而不是
+"config apply failed" 的 generic warning)。
+
+**Defect 3 — bootstrap 分支永远走 `*)` 跳过**:
+v3.4.7 的 case 语句 match `native` / `legacy`,但 install 实际设置
+`MCODE_KIND="npm-global"` / `"platform"`(layout,不是 runtime path)。结果
+bootstrap **从来没真正跑过** —— 用户跑 install 后 config.yaml 不会被
+更新。需要:
+- bootstrap 改用 `BOOT_MODE`,从 `MCODE_VERSION` 对比 0.4.0 推导
+- 删除已经声明但未定义的 `$NODE_BIN` 引用(改成裸 `node`)
+- 补上 `CONFIG_YAML="${MCODE_CONFIG_YAML:-${HOME}/.minimax/config.yaml}"`,
+  否则 `set -u` 会让 bootstrap 段立刻报 unbound variable
+- 移除 dead `MCODE_QUOTA_OFFLINE` 分支(env 没人设过)
+
+**文档 audit 清理**:
+- `AGENTS.md` 顶部 wrapper 描述更新 ("v3.4.7 提前删 wrapper,v4.0 路线作废")
+- `AGENTS.md` § 7/8 PATH entry + first-run 步骤重写
+- `ARCHITECTURE.md` 顶部 banner 重写 ("v3.4.7 wrapper deleted")
+- `INSTALL.md` 顶部同样;§ troubleshooting 的 "old wrapper didn't follow
+  symlinks" 行换成 symlink target 移动场景
+- `MAINTENANCE.md` § 10 整个 deprecation roadmap 重写为"历史 + v3.4.7 提前
+  完成 v4.0 目标",新增 § 10.4 改动后 sanity 检查
+- `README.md` 顶部 v3.4.7 说明
+- `CHANGELOG.md` / `DECISIONS.md` / `RELEASE-v3.4.md` 不动(历史快照)
+
+**冒烟测试 +15** (G 段):
+- G1: `lib/data.mjs` 在 `MCODE_QUOTA_TTL_MS=0` 下加载干净
+- G2: 空 `MCODEX_CACHE_DIR` 回落到 default;`??` 语义说明
+- G3: 6 个版本号 vs 0.4.0 的 native/legacy 推导表(0.4.0/0.4.7/0.5.0 →
+  native,0.3.99/0.3.11 → legacy,1.0.0 → native)
+- G4: install 脚本静态扫描 (无 `$NODE_BIN`、无 `MCODE_QUOTA_OFFLINE`、
+  有 `CONFIG_YAML=`、有 `BOOT_MODE`、bash -n 通过)
+- G5: install 在坏项目(lib/ 缺失)下不静默 crash,能看到 node 报错或干净退出
+
+**测试统计**:
+- `tests/parity.mjs`: 19/19
+- `tests/mcode-smoke.mjs`: 106/106
+- `tests/options-smoke.mjs`: **122/122** (含 G 段 15 项)
+
+**真实 config 端到端** (v3.4.7 → v3.4.8 之后):
+- `mcode-hub-install`: bootstrap 真正生效,config.yaml 写入
+  `customStatusLine.command: <repo>/mcode-hub` + `tui.mcode-hub` 块
+- `mcode-hub-doctor`: **17 ok, 0 warnings, 0 failures** (比 v3.4.7 多 1 项:
+  CONFIG_YAML 显式定义后能多检一条)
+- `mcode-hub`: 3 行实时渲染正常
+
 ## 2026-09-16 — v3.4.7：去掉 `mcodex` 前缀 → `mcode-hub-*`；删除 wrapper
 
 `mcode` ≥ 0.4.0 走原生 custom-command 之后,我们不再需要自己的启动

@@ -1,9 +1,11 @@
-# Architecture — mcode-hub (v3.4.0 deprecation of launch wrapper)
+# Architecture — mcode-hub (v3.4.7 wrapper deleted)
 
-> **v3.4.0 起 `mcode-hub`(无子命令)是 deprecation 中的 wrapper**。装好
-> `mcode-hub-install` 之后**直接用 `mcode` 启动**就好,不需要 `mcode-hub`
-> 入口。`mcode-hub` wrapper 还存在的唯一理由是 install / uninstall /
-> status / doctor 四个维护子命令。完整 roadmap 见
+> **v3.4.7 起 wrapper 已删除**。`mcode-hub` 现在只是 mcode spawn 的渲染脚本
+> (per `tui.customStatusLine.command`),不再有 launch wrapper。装好
+> `mcode-hub-install` 之后**直接跑 `mcode`**——mcode 自己读
+> `~/.minimax/config.yaml` 里的 `customStatusLine.command` 拉起 mcode-hub。
+> 维护入口:`mcode-hub-doctor`、`mcode-hub-push-remote`、
+> `mcode-hub-status-compact`、PATH 上的 `mcode-hub-install`。完整 roadmap 见
 > [MAINTENANCE.md §10](MAINTENANCE.md#10-mcode-hub-入口-deprecation-路线图v340-起)。
 
 ## 0. 启动路径（mcode ≥ 0.4.0, 主流）

@@ -54,6 +54,9 @@ COPY_MODE=0
 PROJECT_DIR=""
 CHECK_ONLY=0
 QUIET=0
+# Path the installer should read+write. Bootstrap and the doctor both
+# default to the same place if the env var is unset.
+CONFIG_YAML="${MCODE_CONFIG_YAML:-${HOME}/.minimax/config.yaml}"
 
 usage() {
   sed -n '2,42p' "$0"
@@ -454,13 +457,27 @@ main() {
     say "skipping first-run (per --no-fork)"
   else
     # v3.4.7+ has no wrapper. Inline the strategy-specific bootstrap that
-    # `mcode-hub --version` used to do.
-    say "first run: applying status-line setup ($MCODE_KIND)..."
-    local SIDECAR="${PROJECT_DIR}/sidecar/mcode-quota-fetcher-9f8a7b.mjs"
-    local PATCH_ARGS=()
-    case "$MCODE_KIND" in
+    # `mcode-hub --version` used to do. We intentionally keep node's stderr
+    # visible on failure (don't redirect 2>&1) so the user can see WHY it
+    # failed — generic "config apply failed" without context is unhelpful.
+    #
+    # `MCODE_KIND` is the install LAYOUT (npm-global / platform). The
+    # bootstrap dispatch is the runtime path (native / legacy), which is
+    # determined by the version vs 0.4.0.  Derive here so we don't depend
+    # on something the user has set in the env.
+    local BOOT_MODE=""
+    if [[ "$(printf '%s\n%s\n' "0.4.0" "$MCODE_VERSION" \
+              | awk -F. '{ printf "%09d %09d %09d %s\n", $1+0, $2+0, $3+0, $0 }' \
+              | sort | awk '{ print $4 }' | head -n1)" == "0.4.0" ]]; then
+      BOOT_MODE="native"
+    else
+      BOOT_MODE="legacy"
+    fi
+    say "first run: applying status-line setup ($BOOT_MODE)..."
+    case "$BOOT_MODE" in
       native)
-        if "$NODE_BIN" --input-type=module -e "
+        local BOOT_ERR
+        if BOOT_ERR="$(node --input-type=module -e "
           import { applyStatuslineConfig, applyMcodexOptions } from '${PROJECT_DIR}/lib/config-apply.mjs';
           const r1 = applyStatuslineConfig('${CONFIG_YAML}', {
             command: '${PROJECT_DIR}/mcode-hub',
@@ -469,24 +486,29 @@ main() {
           });
           const r2 = applyMcodexOptions('${CONFIG_YAML}', {});
           console.log(JSON.stringify({ statusline: r1, options: r2 }));
-        " >/dev/null 2>&1; then
+        " 2>&1 >/dev/null)"; then
           ok "setup done (config applied; run \`mcode\` to launch)"
         else
-          warn "config apply failed — see stderr; run \`$PROJECT_DIR/mcode-hub-doctor\` to diagnose"
+          warn "config apply failed:"
+          printf '%s\n' "$BOOT_ERR" | sed 's/^/    /' >&2
+          warn "run \`$PROJECT_DIR/mcode-hub-doctor\` to diagnose"
         fi
         ;;
       legacy)
-        PATCH_ARGS=(--src="$SRC_RELEASE_DIR" --fork-base="$FORK_BASE"
-                    --sidecar="$SIDECAR" --current="$MCODE_VERSION")
-        if [[ "${MCODE_QUOTA_OFFLINE:-0}" == "1" ]]; then PATCH_ARGS+=(--offline); fi
-        if "$NODE_BIN" "$PROJECT_DIR/patches/_loader.mjs" "${PATCH_ARGS[@]}" >/dev/null 2>&1; then
+        local SIDECAR="${PROJECT_DIR}/sidecar/mcode-quota-fetcher-9f8a7b.mjs"
+        local PATCH_ARGS=(--src="$SRC_RELEASE_DIR" --fork-base="$FORK_BASE"
+                          --sidecar="$SIDECAR" --current="$MCODE_VERSION")
+        local BOOT_ERR
+        if BOOT_ERR="$(node "$PROJECT_DIR/patches/_loader.mjs" "${PATCH_ARGS[@]}" 2>&1 >/dev/null)"; then
           ok "setup done (fork built; run \`mcode\` to launch)"
         else
-          warn "fork build failed — see stderr; run \`$PROJECT_DIR/mcode-hub-doctor\` to diagnose"
+          warn "fork build failed:"
+          printf '%s\n' "$BOOT_ERR" | sed 's/^/    /' >&2
+          warn "run \`$PROJECT_DIR/mcode-hub-doctor\` to diagnose"
         fi
         ;;
       *)
-        warn "unknown MCODE_KIND='$MCODE_KIND'; skipping bootstrap"
+        warn "unknown BOOT_MODE='$BOOT_MODE'; skipping bootstrap"
         ;;
     esac
   fi

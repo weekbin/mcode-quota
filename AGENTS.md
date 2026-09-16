@@ -15,9 +15,10 @@ mcode-hub **不再 fork mcode 源码**(自 v3.3.0 起, mcode ≥ 0.4.0 native
 2. **维护期诊断**:`./mcode-hub status` 看 strategy & config 状态、
    `./mcode-hub-doctor` 跑 17 项自检
 
-**`mcode-hub`(无子命令)跟 `mcode` 等价** — 同一份 `cli.js`、同一份
-config。`mcode-hub -c` 跟 `mcode -c` 也等价。详见 MAINTENANCE.md §10
-deprecation roadmap(v3.4 警告 / v3.5 不默认装 symlink / v4.0 删 wrapper)。
+**v3.4.7 起 wrapper 已删除**:`mcode-hub` 现在是 mcode spawn 的渲染器脚本,
+不再有"无子命令等价于 mcode"的 wrapper。装好之后直接跑 `mcode`。历史
+roadmap 见 MAINTENANCE.md §10(v3.4 警告 / v3.5 不默认装 symlink /
+**v3.4.7 提前删 wrapper**,v4.0 路线作废)。
 
 有两种 strategy, 按 mcode 版本自动分:
 
@@ -148,16 +149,19 @@ mcode-hub-install failed
      line degrades gracefully. Use `--mmx-fail` to make this an error
      instead.
 7. **Install PATH entry** — symlink `~/.minimax/bin/mcode-hub-install` to the
-   project's `mcode-hub` wrapper. Use `--copy` for a copy instead. The
-   wrapper resolves symlinks before deriving its project root
+   project's `mcode-hub-install`. Use `--copy` for a copy instead. The
+   script resolves symlinks before deriving its project root
    (BASH_SOURCE[0] alone would yield the symlink's directory), so a
    symlink is safe.
-8. **First run** — `mcode-hub --version`. What that does depends on the
-   detected version:
-   - **≥ 0.4.0 (native)**: writes the two `custom-command` keys into
-     `~/.minimax/config.yaml` and execs stock mcode. No fork is created.
-   - **< 0.4.0 (legacy)**: materializes the fork under
-     `~/.local/share/mcode-hub/mcode-clone/<v>/code/`.
+8. **First run** — bootstrap is inlined in `mcode-hub-install`. What it does
+   depends on the detected version:
+   - **≥ 0.4.0 (native)**: inlined node one-liner calls
+     `applyStatuslineConfig` + `applyMcodexOptions`. Writes the two
+     `custom-command` keys and the `tui.mcode-hub` block into
+     `~/.minimax/config.yaml`. No fork is created.
+   - **< 0.4.0 (legacy)**: inlined invocation of
+     `patches/_loader.mjs --src=… --fork-base=… --sidecar=…`. Materializes
+     the fork under `~/.local/share/mcode-hub/mcode-clone/<v>/code/`.
    Either way it is idempotent — re-running only re-checks equality.
 
 ## Cross-OS compatibility
