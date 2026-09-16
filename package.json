@@ -14,6 +14,8 @@
     "find-anchors": "node patches/_loader.mjs --current=0.3.11",
     "doctor": "./mcode-quota-doctor",
     "smoke": "node tests/mcode-smoke.mjs",
+    "smoke:options": "node tests/options-smoke.mjs",
+    "test": "node tests/parity.mjs && node tests/mcode-smoke.mjs && node tests/options-smoke.mjs",
     "push-remote": "./mcodex-push-remote"
   },
   "files": [
