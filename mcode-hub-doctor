@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# mcodex doctor — verify the quota/token status rows.
+# mcode-hub-doctor — verify the quota/token status rows.
 #
 # Exit 0 = all good; non-zero = something needs attention.
 #
 # There are two eras, and the invariants differ:
 #
-#   mcode >= 0.4.0 (native)  — mcodex writes a config entry and mcode's own
-#       `custom-command` status item runs mcodex-status. The invariant is
+#   mcode >= 0.4.0 (native)  — mcode-hub writes a config entry and mcode's own
+#       `custom-command` status item runs mcode-hub. The invariant is
 #       "mcode untouched AND the config points at a working script".
 #
 #   mcode <  0.4.0 (legacy)  — a private pristine-tarball fork is patched.
@@ -17,12 +17,12 @@ set -uo pipefail
 
 QUOTA_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CODE_ROOT="${MCODE_CODE_ROOT:-$HOME/.minimax-code}"
-FORK_BASE="${MCODE_QUOTA_FORK_DIR:-$HOME/.local/share/mcode-quota/mcode-clone}"
-SIDECAR="$QUOTA_DIR/sidecar/mcode-quota-fetcher-9f8a7b.mjs"
+FORK_BASE="${MCODE_QUOTA_FORK_DIR:-$HOME/.local/share/mcode-hub/mcode-clone}"
+SIDECAR="$QUOTA_DIR/sidecar/mcode-hub-fetcher-9f8a7b.mjs"
 PATCHES_DIR="$QUOTA_DIR/patches"
 LOADER="$PATCHES_DIR/_loader.mjs"
 CONFIG_YAML="${MCODE_CONFIG_YAML:-$HOME/.minimax/config.yaml}"
-STATUS_BIN="$QUOTA_DIR/mcodex-status"
+STATUS_BIN="$QUOTA_DIR/mcode-hub"
 NATIVE_MIN="0.4.0"
 
 # Portable dotted-numeric version sort. `sort -V` is GNU-only and macOS BSD
@@ -96,13 +96,13 @@ if [[ "$IS_NATIVE" == "1" ]]; then
   if [[ -f "$CONFIG_YAML" ]]; then
     ok "config present: $CONFIG_YAML"
   else
-    fail "config missing: $CONFIG_YAML — run: mcodex install"
+    fail "config missing: $CONFIG_YAML — run: mcode-hub-install"
   fi
 
   if grep -q "custom-command" "$CONFIG_YAML" 2>/dev/null; then
     ok "statusLine includes custom-command"
   else
-    fail "statusLine lacks custom-command — run: mcodex install"
+    fail "statusLine lacks custom-command — run: mcode-hub-install"
   fi
 
   if grep -q "customStatusLine:" "$CONFIG_YAML" 2>/dev/null; then
@@ -112,7 +112,7 @@ if [[ "$IS_NATIVE" == "1" ]]; then
     elif [[ -n "$CMD_LINE" ]]; then
       fail "customStatusLine.command not executable: $CMD_LINE"
     else
-      fail "customStatusLine has no command: — run: mcodex install"
+      fail "customStatusLine has no command: — run: mcode-hub-install"
     fi
     if grep -qE "maxLines:[[:space:]]*3" "$CONFIG_YAML" 2>/dev/null; then
       ok "maxLines = 3 (matches the 3-row layout)"
@@ -125,13 +125,13 @@ if [[ "$IS_NATIVE" == "1" ]]; then
       warn "colorMode is not ansi; mcode will strip our colours"
     fi
   else
-    fail "customStatusLine block missing — run: mcodex install"
+    fail "customStatusLine block missing — run: mcode-hub-install"
   fi
 
   if [[ -x "$STATUS_BIN" ]]; then
-    ok "mcodex-status executable: $STATUS_BIN"
+    ok "mcode-hub executable: $STATUS_BIN"
   else
-    fail "mcodex-status missing or not executable: $STATUS_BIN"
+    fail "mcode-hub missing or not executable: $STATUS_BIN"
   fi
 
   # Live run: feed a synthetic payload exactly like mcode does, then check the
@@ -228,24 +228,24 @@ else
   if [[ -f "$FORK_BASE/$CURRENT_VERSION/.fork-marker" ]]; then
     ok "fork marker: $FORK_BASE/$CURRENT_VERSION"
   else
-    warn "fork not initialized yet — run: mcodex (it builds the fork on first launch)"
+    warn "fork not initialized yet — run: mcode-hub-install (it builds the fork on first launch)"
   fi
 
   if [[ -n "$FORK_LAUNCHER" && -f "$FORK_LAUNCHER" ]]; then
     if grep -q "__mcodeQuotaRender" "$FORK_LAUNCHER"; then
       ok "fork launcher render hook present"
     else
-      fail "fork launcher render hook missing — re-run: mcodex"
+      fail "fork launcher render hook missing — re-run: mcode-hub-install"
     fi
   else
     warn "fork launcher not built yet"
   fi
 
   if [[ -f "$FORK_CODE/cli.js" ]]; then
-    if grep -q "mcode-quota-sidecar" "$FORK_CODE/cli.js"; then
+    if grep -q "mcode-hub-sidecar" "$FORK_CODE/cli.js"; then
       ok "fork cli.js imports sidecar statically"
     else
-      fail "fork cli.js does not import the sidecar — re-run: mcodex"
+      fail "fork cli.js does not import the sidecar — re-run: mcode-hub-install"
     fi
   else
     warn "fork cli.js not built yet"
@@ -258,13 +258,13 @@ else
       fail "sidecar failed node --check: $SIDECAR"
     fi
   else
-    fail "sidecar missing: $SIDECAR — run: mcodex"
+    fail "sidecar missing: $SIDECAR — run: mcode-hub-install"
   fi
 
-  if grep -qE '^[[:space:]]*(export[[:space:]]+)?NODE_OPTIONS=' "$QUOTA_DIR/mcodex"; then
-    fail "mcodex sets NODE_OPTIONS — leaks the sidecar into child processes (storm risk)"
+  if grep -qE '^[[:space:]]*(export[[:space:]]+)?NODE_OPTIONS=' "$QUOTA_DIR/mcode-hub-install"; then
+    fail "mcode-hub-install sets NODE_OPTIONS — leaks the sidecar into child processes (storm risk)"
   else
-    ok "mcodex does not use NODE_OPTIONS"
+    ok "mcode-hub-install does not use NODE_OPTIONS"
   fi
 
   if [[ -f "$SIDECAR" ]]; then
@@ -336,10 +336,10 @@ else
 fi
 
 # 10. launcher shim present
-if [[ -f "$HOME/.minimax/bin/mcodex" ]]; then
-  ok "PATH entry: ~/.minimax/bin/mcodex"
+if [[ -f "$HOME/.minimax/bin/mcode-hub-install" ]]; then
+  ok "PATH entry: ~/.minimax/bin/mcode-hub-install"
 else
-  info "~/.minimax/bin/mcodex not present (call $QUOTA_DIR/mcodex directly, or add it to PATH)"
+  info "~/.minimax/bin/mcode-hub-install not present (call $QUOTA_DIR/mcode-hub-install directly, or add it to PATH)"
 fi
 
 # 11. no mmx process storm

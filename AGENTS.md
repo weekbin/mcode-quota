@@ -1,30 +1,30 @@
-# AGENTS.md — installing mcodex on a new machine
+# AGENTS.md — installing mcode-hub on a new machine
 
-> **If you are an AI agent** asked to set up mcodex on a machine that does
+> **If you are an AI agent** asked to set up mcode-hub on a machine that does
 > not have it yet, **read this file first.** It tells you exactly what to
 > do, in what order, and how to recover when things go wrong.
 
-## What mcodex is (and isn't) — v3.4.0 起
+## What mcode-hub is (and isn't) — v3.4.0 起
 
-mcodex **不再 fork mcode 源码**(自 v3.3.0 起, mcode ≥ 0.4.0 native
+mcode-hub **不再 fork mcode 源码**(自 v3.3.0 起, mcode ≥ 0.4.0 native
 `tui.customStatusLine` 路径)。它只做两件事:
 
-1. **安装期一次性写配置**:`./mcodex-install` 把 `tui.statusLine` +
+1. **安装期一次性写配置**:`./mcode-hub-install` 把 `tui.statusLine` +
    `tui.customStatusLine` 合并进 `~/.minimax/config.yaml`,之后 mcode
-   自己读这份配置、自己 spawn `mcodex-status` 拿 quota 行
-2. **维护期诊断**:`./mcodex status` 看 strategy & config 状态、
-   `./mcodex-doctor` 跑 17 项自检
+   自己读这份配置、自己 spawn `mcode-hub` 拿 quota 行
+2. **维护期诊断**:`./mcode-hub status` 看 strategy & config 状态、
+   `./mcode-hub-doctor` 跑 17 项自检
 
-**`mcodex`(无子命令)跟 `mcode` 等价** — 同一份 `cli.js`、同一份
-config。`mcodex -c` 跟 `mcode -c` 也等价。详见 MAINTENANCE.md §10
+**`mcode-hub`(无子命令)跟 `mcode` 等价** — 同一份 `cli.js`、同一份
+config。`mcode-hub -c` 跟 `mcode -c` 也等价。详见 MAINTENANCE.md §10
 deprecation roadmap(v3.4 警告 / v3.5 不默认装 symlink / v4.0 删 wrapper)。
 
 有两种 strategy, 按 mcode 版本自动分:
 
 | mcode | strategy | 干了什么 |
 |---|---|---|
-| **≥ 0.4.0** | **native(主流)** | 写 `~/.minimax/config.yaml` 的 `tui.customStatusLine.command` 指向 `<repo>/mcodex-status`, mcode 自己用 mcode 内置的 custom-command 机制跑它。**不 fork、不 patch** |
-| **< 0.4.0** | legacy fork | `patches/_loader.mjs` 选 `patches/<version>/`,patcher 在 `~/.local/share/mcode-quota/mcode-clone/<v>/code/` 构私有 fork |
+| **≥ 0.4.0** | **native(主流)** | 写 `~/.minimax/config.yaml` 的 `tui.customStatusLine.command` 指向 `<repo>/mcode-hub`, mcode 自己用 mcode 内置的 custom-command 机制跑它。**不 fork、不 patch** |
+| **< 0.4.0** | legacy fork | `patches/_loader.mjs` 选 `patches/<version>/`,patcher 在 `~/.local/share/mcode-hub/mcode-clone/<v>/code/` 构私有 fork |
 
 两条路径共用 `lib/render.mjs`; `tests/parity.mjs` 断言输出逐字节
 一致。核心不变量对两条都成立:**mcode 本体从来没被改过** —— native
@@ -33,20 +33,20 @@ deprecation roadmap(v3.4 警告 / v3.5 不默认装 symlink / v4.0 删 wrapper)�
 Check 哪条生效:
 
 ```bash
-./mcodex status
+./mcode-hub status
 ```
 
 ## Quick path (one command, idempotent)
 
 ```bash
-git clone https://github.com/weekbin/mcode-quota.git ~/Works/mcode-quota
-cd ~/Works/mcode-quota
-./mcodex-install
+git clone https://github.com/weekbin/mcode-hub.git ~/Works/mcode-hub
+cd ~/Works/mcode-hub
+./mcode-hub-install
 ```
 
 If that succeeds, you are done. If not, read §3.
 
-For a non-destructive diagnostic, run `./mcodex-install --check` first.
+For a non-destructive diagnostic, run `./mcode-hub-install --check` first.
 It reports what is present, what is missing, and what would be installed,
 without changing anything.
 
@@ -64,7 +64,7 @@ The install script handles ~95% of cases. The remaining 5% is when
 | Arch / Manjaro | `sudo pacman -S --noconfirm nodejs npm` |
 | Alpine | `sudo apk add nodejs npm` |
 
-After installing, re-run `./mcodex-install`.
+After installing, re-run `./mcode-hub-install`.
 
 `mcode` is not in the standard package managers. The supported install
 methods are:
@@ -76,7 +76,7 @@ methods are:
 ## Decision tree when things fail
 
 ```
-mcodex-install failed
+mcode-hub-install failed
   │
   ├─ pre-flight says "node: MISSING"
   │    └─ install node + npm per OS table above, re-run
@@ -90,32 +90,32 @@ mcodex-install failed
   ├─ mmx install fails (5h/周 quota line stays empty)
   │    └─ manual: `npm install -g mmx-cli`
   │       (mmx-cli is at https://github.com/MiniMax-AI/cli)
-  │       mcodex still works without mmx — 4 of 6 data sources
+  │       mcode-hub still works without mmx — 4 of 6 data sources
   │       (会话 tokens / 上下文 / 缓存命中 / 轮数 / 今日按模型) still show.
   │       Only 5h/周 quota is missing.
   │
   ├─ "Cannot find module '...patches/_loader.mjs'"
   │    └─ PATH entry is a symlink to the project but the installed
-  │       mcodex is too old to follow symlinks. Either:
-  │       a) update mcodex (`git pull` in the project) and re-run
-  │       b) use a copy instead: `./mcodex-install --copy`
+  │       mcode-hub is too old to follow symlinks. Either:
+  │       a) update mcode-hub (`git pull` in the project) and re-run
+  │       b) use a copy instead: `./mcode-hub-install --copy`
   │
   ├─ native path (>= 0.4.0) shows no status block at all
-  │    ├─ `mcodex status` says "config applied: no"
-  │    │    └─ `mcodex install` (idempotent; rewrites only its own keys)
-  │    ├─ `mcodex status` says yes, but still nothing
-  │    │    └─ `mcodex doctor`; check the statusLine / command items.
+  │    ├─ `mcode-hub status` says "config applied: no"
+  │    │    └─ `mcode-hub install` (idempotent; rewrites only its own keys)
+  │    ├─ `mcode-hub status` says yes, but still nothing
+  │    │    └─ `mcode-hub doctor`; check the statusLine / command items.
   │    │       Then feed the script a payload by hand:
   │    │       printf '{"protocol":1,"event":"interval","session_id":"<mvs_…>",
   │    │         "workspace_dir":"/tmp","model":"-","tui_version":"0.4.0"}\n'
-  │    │         | COLUMNS=200 ./mcodex-status
+  │    │         | COLUMNS=200 ./mcode-hub
   │    │       Output => mcode side. No output => MCODEX_STATUS_DEBUG=1 for why.
-  │    └─ config was rewritten by mcode → just `mcodex install` again
+  │    └─ config was rewritten by mcode → just `mcode-hub install` again
   │
   └─ doctor shows "mcode launcher differs from pristine npm tarball"
        └─ mcode itself was modified. Neither strategy writes to mcode —
           the native one does not even open it. Either the user did, or
-          an old mcodex version did. Restore: MAINTENANCE.md §6.
+          an old mcode-hub version did. Restore: MAINTENANCE.md §6.
 ```
 
 ## How the install script decides what to do
@@ -144,20 +144,20 @@ mcodex-install failed
    - Fallback B: download the tarball directly from the npm registry,
      extract, and `npm install -g .` from the extracted dir (works
      even when the npm CLI itself is broken)
-   - Final: warn and skip — mcodex works without mmx, the 5h/周 quota
+   - Final: warn and skip — mcode-hub works without mmx, the 5h/周 quota
      line degrades gracefully. Use `--mmx-fail` to make this an error
      instead.
-7. **Install PATH entry** — symlink `~/.minimax/bin/mcodex` to the
-   project's `mcodex` wrapper. Use `--copy` for a copy instead. The
+7. **Install PATH entry** — symlink `~/.minimax/bin/mcode-hub-install` to the
+   project's `mcode-hub` wrapper. Use `--copy` for a copy instead. The
    wrapper resolves symlinks before deriving its project root
    (BASH_SOURCE[0] alone would yield the symlink's directory), so a
    symlink is safe.
-8. **First run** — `mcodex --version`. What that does depends on the
+8. **First run** — `mcode-hub --version`. What that does depends on the
    detected version:
    - **≥ 0.4.0 (native)**: writes the two `custom-command` keys into
      `~/.minimax/config.yaml` and execs stock mcode. No fork is created.
    - **< 0.4.0 (legacy)**: materializes the fork under
-     `~/.local/share/mcode-quota/mcode-clone/<v>/code/`.
+     `~/.local/share/mcode-hub/mcode-clone/<v>/code/`.
    Either way it is idempotent — re-running only re-checks equality.
 
 ## Cross-OS compatibility
@@ -195,36 +195,36 @@ only re-creates the read-only shim if missing.
 
 - Do **not** run `mcode update` on the user's behalf unless explicitly
   asked. It modifies mcode itself.
-- Do **not** run `rm -rf` on `~/.local/share/mcode-quota/` or
+- Do **not** run `rm -rf` on `~/.local/share/mcode-hub/` or
   `~/.minimax-code/`. Use `node -e 'require("fs").rmSync(...)'`. The
   user may have other state in `~/.minimax-code/` (e.g. a platform
   mcode install).
 - Do **not** modify files in the user's npm-global mcode. The shim
   already exposes it read-only.
-- Do **not** commit anything to the mcode-quota repo without an
+- Do **not** commit anything to the mcode-hub repo without an
   explicit task. The repo is a personal mirror at
-  `github.com/weekbin/mcode-quota`.
+  `github.com/weekbin/mcode-hub`.
 - Do **not** hand-edit `~/.minimax/config.yaml` to add or remove the
-  `custom-command` / `customStatusLine` keys — run `mcodex install` /
-  `mcodex uninstall`. They edit only those keys, keep every comment and
+  `custom-command` / `customStatusLine` keys — run `mcode-hub install` /
+  `mcode-hub uninstall`. They edit only those keys, keep every comment and
   the surrounding layout, and round-trip byte-identically; a manual edit
   easily corrupts a file the user has tuned.
 - Do **not** force-push the mirror. If the remote has moved ahead (for
-  example another machine pushed), `mcodex-push-remote` fetches and
+  example another machine pushed), `mcode-hub-push-remote` fetches and
   merges with `-s ours`, preserving the other side's commits.
 
 ## Verifying success
 
-Run `./mcodex status` first — it names the strategy in force:
+Run `./mcode-hub status` first — it names the strategy in force:
 
 ```
-mcodex status
+mcode-hub status
   mcode version   : 0.4.0
   strategy        : native custom-command (no fork, no patching)
   config applied  : yes
 ```
 
-Then `./mcode-quota-doctor`. It runs the check set for the detected
+Then `./mcode-hub-doctor`. It runs the check set for the detected
 strategy and should end with:
 
 ```
@@ -234,9 +234,9 @@ Result: 18 ok, 0 warnings, 0 failures
 **Native path (≥ 0.4.0)** — items to look at:
 
 - `mcode launcher pristine (no quota hooks)` — mcode unmodified
-- `config present: ~/.minimax/config.yaml` — mcodex's config is there
+- `config present: ~/.minimax/config.yaml` — mcode-hub's config is there
 - `statusLine includes custom-command` — our item is wired in
-- `customStatusLine.command executable: …/mcodex-status`
+- `customStatusLine.command executable: …/mcode-hub`
 - `maxLines = 3` / `colorMode = ansi`
 - `live render: 会话 tokens …` — the script answers a synthetic payload
 - `parity with legacy fork renderer: 19 pass, 0 fail`
@@ -253,7 +253,7 @@ launch that is the 10 s tick, not a failure.
 
 ## Upgrading mcode later (what an agent should do)
 
-`mcode update && mcodex install && mcodex doctor`. On the native path
+`mcode update && mcode-hub install && mcode-hub doctor`. On the native path
 that is almost always the whole job — the full playbook, including when
 code changes *are* needed, is MAINTENANCE.md §3. Read it before editing
 anything. After any code change, `tests/parity.mjs` and

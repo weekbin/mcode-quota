@@ -1,10 +1,10 @@
-# Architecture — mcodex (v3.4.0 deprecation of launch wrapper)
+# Architecture — mcode-hub (v3.4.0 deprecation of launch wrapper)
 
-> **v3.4.0 起 `mcodex`(无子命令)是 deprecation 中的 wrapper**。装好
-> `mcodex-install` 之后**直接用 `mcode` 启动**就好,不需要 `mcodex`
-> 入口。`mcodex` wrapper 还存在的唯一理由是 install / uninstall /
+> **v3.4.0 起 `mcode-hub`(无子命令)是 deprecation 中的 wrapper**。装好
+> `mcode-hub-install` 之后**直接用 `mcode` 启动**就好,不需要 `mcode-hub`
+> 入口。`mcode-hub` wrapper 还存在的唯一理由是 install / uninstall /
 > status / doctor 四个维护子命令。完整 roadmap 见
-> [MAINTENANCE.md §10](MAINTENANCE.md#10-mcodex-入口-deprecation-路线图v340-起)。
+> [MAINTENANCE.md §10](MAINTENANCE.md#10-mcode-hub-入口-deprecation-路线图v340-起)。
 
 ## 0. 启动路径（mcode ≥ 0.4.0, 主流）
 
@@ -18,25 +18,25 @@
               │     mcode 0.4.0+ cli.js    │
               │   读 ~/.minimax/config.yaml│
               │   tui.customStatusLine     │
-              │   .command = mcodex-status │
+              │   .command = mcode-hub │
               └──────────┬─────────────────┘
                          │  spawn (stdin JSON,
                          │   每 10s / 切 session)
                          ▼
-                  mcodex-status            ← 唯一需要 PATH 入口的脚本
+                  mcode-hub            ← 唯一需要 PATH 入口的脚本
                          │
                          ▼
                   lib/render.mjs (3 行)
 ```
 
-`mcodex-install` 只在**安装期**碰一次 config.yaml(把
+`mcode-hub-install` 只在**安装期**碰一次 config.yaml(把
 `customStatusLine` 两键写进去),之后 mcode 自己读、自己 spawn,
-`mcodex` 不出现在启动路径上。
+`mcode-hub` 不出现在启动路径上。
 
 ## 0.5. legacy fork 路径（mcode < 0.4.0, 维护期)
 
 ```
-                    mcodex [args]
+                    mcode-hub [args]
                           │
               ┌───────────┴────────────┐
       mcode >= 0.4.0            mcode < 0.4.0
@@ -50,7 +50,7 @@
               │                        │
    mcode 的 custom-command          fork 的 cli.js
    每 10s / 切 session 跑              静态 import sidecar
-   mcodex-status                    （不走 NODE_OPTIONS）
+   mcode-hub                    （不走 NODE_OPTIONS）
               │                        │
               └───────────┬────────────┘
                           ▼
@@ -74,12 +74,12 @@ mcode 0.4.0 起状态栏渲染在基类 `ba.renderViewport(width, height)`，wid
 只是控制器（实测调用次数 0 vs 22，见 DECISIONS D30）。与其继续注入内部方法，
 不如用官方扩展点：
 
-1. `mcodex install` 把 `custom-command` 加进 `tui.statusLine`，并写入
+1. `mcode-hub install` 把 `custom-command` 加进 `tui.statusLine`，并写入
    `tui.customStatusLine`（`lib/config-apply.mjs` 做文本级合并，保留注释与排版，
    幂等，install/uninstall 往返字节级一致）。
 2. mcode 在 startup / `session-change` / `workspace-change` / 每
-   `intervalSeconds`（最小 10）调用 `mcodex-status`，向 stdin 写一行 JSON。
-3. `mcodex-status` 取数（`lib/data.mjs`）→ 渲染（`lib/render.mjs`）→ 3 行到
+   `intervalSeconds`（最小 10）调用 `mcode-hub`，向 stdin 写一行 JSON。
+3. `mcode-hub` 取数（`lib/data.mjs`）→ 渲染（`lib/render.mjs`）→ 3 行到
    stdout。mcode 渲染在原生状态栏下方（`position: below`）。
 
 **故障收敛**：脚本退出码非 0 或输出为空时 mcode 只是不显示块，不会影响 TUI。
@@ -108,10 +108,10 @@ mcode 0.4.0 起状态栏渲染在基类 `ba.renderViewport(width, height)`，wid
 
 | 策略 | 升级动作 | 通常要改代码吗 |
 |---|---|---|
-| 原生（≥0.4.0） | `mcode update && mcodex install && mcodex doctor` | **不用**。我们依赖的是配置 schema（`tui.statusLine` / `tui.customStatusLine`）与两处 sqlite 表，是外部契约 |
-| legacy（<0.4.0） | `mcode update && mcodex`（自动重打补丁） | widget 结构真变了才加 `patches/<新版本>/` |
+| 原生（≥0.4.0） | `mcode update && mcode-hub install && mcode-hub doctor` | **不用**。我们依赖的是配置 schema（`tui.statusLine` / `tui.customStatusLine`）与两处 sqlite 表，是外部契约 |
+| legacy（<0.4.0） | `mcode update && mcode-hub`（自动重打补丁） | widget 结构真变了才加 `patches/<新版本>/` |
 
-**跨过 0.4.0 那一次**是一次性切换：`mcodex install` 写配置，之后可以删掉 fork
+**跨过 0.4.0 那一次**是一次性切换：`mcode-hub install` 写配置，之后可以删掉 fork
 释放空间。**结论**：原生路径把「每次升级都要重新适配」变成了「只在 mcode 改
 外部契约时才动」。
 
@@ -124,21 +124,21 @@ mcode 0.4.0 起状态栏渲染在基类 `ba.renderViewport(width, height)`，wid
 | 原则 | 实现 |
 |---|---|
 | mcode 本体只读 | 从不写 `~/.minimax-code/**`；doctor 校验其与 npm 官方包字节一致 |
-| 补丁只落在私有 fork | `~/.local/share/mcode-quota/mcode-clone/<版本>/code/` |
+| 补丁只落在私有 fork | `~/.local/share/mcode-hub/mcode-clone/<版本>/code/` |
 | fork 来源必须干净 | 从 npm registry 下载官方 tarball 解压，**不是**复制已安装目录 |
 | fork 必须是真实拷贝 | 不用 symlink（Node 默认 realpath，会把相对 import 指回源安装，patch 失效） |
-| 可随时推倒重建 | 删掉 fork 目录，下次 `mcodex` 自动重建 |
+| 可随时推倒重建 | 删掉 fork 目录，下次 `mcode-hub` 自动重建 |
 
 ## 7. 目录与来源
 
 ### 7.1 项目目录（两条路径共用）
 
 ```
-mcode-quota/
-├── mcodex                     入口：按 mcode 版本分发 + install/uninstall/status/doctor
-├── mcodex-status              ≥0.4.0 的 custom-command 目标（stdin JSON → 3 行 stdout）
-├── mcodex-install             新机器一次性安装（跨 OS、装依赖、建 PATH 条目）
-├── mcode-quota-doctor         自检（按版本选对应检查集）
+mcode-hub/
+├── mcode-hub                     入口：按 mcode 版本分发 + install/uninstall/status/doctor
+├── mcode-hub              ≥0.4.0 的 custom-command 目标（stdin JSON → 3 行 stdout）
+├── mcode-hub-install             新机器一次性安装（跨 OS、装依赖、建 PATH 条目）
+├── mcode-hub-doctor         自检（按版本选对应检查集）
 ├── lib/
 │   ├── render.mjs             渲染核心（纯函数，无 I/O）—— 两条路径共用
 │   ├── data.mjs               数据层：sqlite 会话/上下文/今日 + mmx 文件缓存
@@ -154,7 +154,7 @@ mcode-quota/
 ### 7.2 legacy fork 的落盘位置（<0.4.0 专用）
 
 ```
-~/.local/share/mcode-quota/mcode-clone/
+~/.local/share/mcode-hub/mcode-clone/
 ├── tarballs/minimax-ai-code-<v>.tgz      # npm pack 缓存（官方 tarball）
 ├── .pristine-<v>/                        # 解压结果（--strip-components=1）
 └── <v>/
@@ -216,7 +216,7 @@ render(e){
 在 `cli.js` 的 shebang 之后插入一行：
 
 ```js
-import "/home/weekbin/orca/projects/mcode/mcode-quota/sidecar/mcode-quota-fetcher-9f8a7b.mjs"; /* mcode-quota-sidecar */
+import "/home/weekbin/orca/projects/mcode/mcode-hub/sidecar/mcode-hub-fetcher-9f8a7b.mjs"; /* mcode-hub-sidecar */
 ```
 
 **这是与旧方案最关键的差异**：旧方案用 `NODE_OPTIONS=--import=…`，该变量被 mcode 派生的
@@ -225,9 +225,9 @@ import "/home/weekbin/orca/projects/mcode/mcode-quota/sidecar/mcode-quota-fetche
 
 ## 9. legacy 路径的 Sidecar
 
-> **<0.4.0 专用**。原生路径改由 `mcodex-status` 脚本承担同样的角色，但由 mcode 通过 `custom-command` 主动调用，不需要 import 注入。
+> **<0.4.0 专用**。原生路径改由 `mcode-hub` 脚本承担同样的角色，但由 mcode 通过 `custom-command` 主动调用，不需要 import 注入。
 
-`sidecar/mcode-quota-fetcher-9f8a7b.mjs` 由 patcher 生成（模板内联在 patcher 里），
+`sidecar/mcode-hub-fetcher-9f8a7b.mjs` 由 patcher 生成（模板内联在 patcher 里），
 与 mcode 共享同一个 V8 isolate，通过 `globalThis` 通信：
 
 ```js
@@ -259,7 +259,7 @@ sidecar **不自动启动**。`__mcodeQuotaRender` 第一次被调用时（即�
 ### 3.2 数据流
 
 ```
-启动 mcodex
+启动 mcode-hub
   ↓
 patcher（幂等）→ fork 就绪
   ↓
@@ -396,7 +396,7 @@ if (!summary || sumTotal(summary) === 0) {
 
 mcode 升级后：
 
-1. `mcodex` 读到新版本号
+1. `mcode-hub` 读到新版本号
 2. `.fork-marker` 版本不匹配 → 删除旧 fork
 3. 重新从 npm 下载新版本 tarball → 重建 fork → 重新找锚点打 patch
 
@@ -404,7 +404,7 @@ mcode 升级后：
 "继承基类的 widget + `render(width)` 返回 string[]" 这套 Ink 契约，就无需人工干预。
 
 如果 mcode 大重构导致锚点找不到，patcher 会明确报错并**回退到未打 patch 的官方 mcode**
-（`mcodex` 的 fallback 分支），不会把你卡住。
+（`mcode-hub` 的 fallback 分支），不会把你卡住。
 
 ### 5.1 patches/ 版本目录机制（v3.1 起）
 
@@ -433,7 +433,7 @@ patches/
 2. 没有精确匹配则选**最高 <= 请求版本**的目录（X.Y.Z 字典序 = 数值序）
 3. 都没有 → 报错并列出可用版本
 
-`mcodex` 调 `patches/_loader.mjs` 而不是直接的 `mcode-patch-quota.mjs`，**老目录的 patcher
+`mcode-hub` 调 `patches/_loader.mjs` 而不是直接的 `mcode-patch-quota.mjs`，**老目录的 patcher
 代码不被任何东西覆盖**。新 mcode 改了 widget → 只需在 `patches/0.3.12/` 加新 patcher
 （或把现有最新版复制过来再改），loader 自动选。
 
@@ -461,7 +461,7 @@ patches/
 
 - fork 每个版本占约 62MB（真实拷贝，换来无 realpath 陷阱）
 - sidecar 路径写死在 fork 的 `cli.js` 里；若移动项目目录，需重跑 patcher
-  （`mcodex` 会自动检测并重写）
+  （`mcode-hub` 会自动检测并重写）
 - AST 锚点需要 mcode 保持"继承基类的 widget + `render(width)` 返回 string[]"
   这套契约；变了就要新增 `patches/<新版本>/`
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// patches/_loader.mjs — version-aware dispatcher for the mcodex patcher.
+// patches/_loader.mjs — version-aware dispatcher for the mcode-hub patcher.
 //
 // Why a loader: each mcode release may have a different status-bar widget
 // structure. We keep a per-version patches/<version>/ directory so that:
@@ -17,7 +17,7 @@
 //
 // The loader forwards the entire argv to the chosen patcher, so all
 // existing flags (--src, --fork-base, --sidecar, --current, --offline)
-// keep working unchanged. mcodex just calls this file instead of
+// keep working unchanged. mcode-hub-install just calls this file instead of
 // mcode-patch-quota.mjs directly.
 
 import { readdirSync, existsSync } from "node:fs";
@@ -38,7 +38,7 @@ const argValue = (flag) => {
 
 const requested = argValue("--current");
 if (!requested) {
-  console.error("loader: --current=<version> is required (mcodex should pass it)");
+  console.error("loader: --current=<version> is required (mcode-hub-install should pass it)");
   process.exit(2);
 }
 
@@ -90,7 +90,7 @@ if (!existsSync(patcher)) {
 }
 
 if (chosen !== requested) {
-  console.error(`[mcodex] mcode ${requested} -> using patches/${chosen}/ (closest available <=)`);
+  console.error(`[mcode-hub] mcode ${requested} -> using patches/${chosen}/ (closest available <=)`);
 }
 
 // Forward argv: the patcher reads process.argv itself, so importing the

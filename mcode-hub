@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// mcodex-status — the `custom-command` target for mcode 0.4.0+.
+// mcode-hub — the `custom-command` target for mcode 0.4.0+.
 //
 // mcode runs this on startup, on session/workspace change, and every
 // `intervalSeconds`, writing one JSON line to stdin and rendering the first
@@ -15,7 +15,7 @@
 //   小时会话窗口 [███████████░░░░░░░░░] 55% 剩余 │ 重置 2h 6m │ 周限制使用量 [███████████████████░] 97% 剩余 │ 重置 2d 11h
 //   今日 「MiniMax-M3」 170.19M │ 「deepseek-flash」 53.25M
 //
-// Nothing here patches mcode. Configure it via `mcodex install` (see
+// Nothing here patches mcode. Configure it via install via `mcode-hub-install` (see
 // config/0.4.0/tui.statusline.yaml) and plain `mcode` shows the rows.
 //
 // Exit behaviour: print nothing and exit 0 on any problem. mcode renders an
@@ -27,7 +27,7 @@ import { collect, DEFAULT_DB } from "./lib/data.mjs";
 import { loadMcodexOptions } from "./lib/options.mjs";
 
 const DEBUG = process.env.MCODEX_STATUS_DEBUG === "1";
-const log = (m) => { if (DEBUG) process.stderr.write("[mcodex-status] " + m + "\n"); };
+const log = (m) => { if (DEBUG) process.stderr.write("[mcode-hub] " + m + "\n"); };
 
 function readStdin() {
   return new Promise((resolve) => {
@@ -85,7 +85,7 @@ async function main() {
 
   let lines = [];
   try {
-    // Per-category visibility + tailMode/decimals come from `tui.mcodex` in
+    // Per-category visibility + tailMode/decimals come from `tui.mcode-hub` in
     // ~/.minimax/config.yaml. Re-read every tick so toggles take effect on
     // the next 10s interval without restarting mcode.
     let opts = {};

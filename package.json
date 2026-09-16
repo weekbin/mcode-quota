@@ -1,27 +1,30 @@
 {
-  "name": "mcode-quota",
-  "version": "3.3.1",
-  "description": "mcodex — fork-isolated quota + session token status bar for mcode",
+  "name": "mcode-hub",
+  "version": "3.4.7",
+  "description": "mcode-hub — quota + session token status bar for mcode (native path ≥0.4.0, legacy fork patch <0.4.0)",
   "type": "module",
   "bin": {
-    "mcodex": "./mcodex",
-    "mcodex-status": "./mcodex-status",
-    "mcode-quota-doctor": "./mcode-quota-doctor",
-    "mcodex-install": "./mcodex-install"
+    "mcode-hub": "./mcode-hub",
+    "mcode-hub-install": "./mcode-hub-install",
+    "mcode-hub-doctor": "./mcode-hub-doctor",
+    "mcode-hub-status-compact": "./mcode-hub-status-compact",
+    "mcode-hub-push-remote": "./mcode-hub-push-remote"
   },
   "scripts": {
     "patch": "node patches/_loader.mjs",
     "find-anchors": "node patches/_loader.mjs --current=0.3.11",
-    "doctor": "./mcode-quota-doctor",
+    "doctor": "./mcode-hub-doctor",
     "smoke": "node tests/mcode-smoke.mjs",
     "smoke:options": "node tests/options-smoke.mjs",
     "test": "node tests/parity.mjs && node tests/mcode-smoke.mjs && node tests/options-smoke.mjs",
-    "push-remote": "./mcodex-push-remote"
+    "push-remote": "./mcode-hub-push-remote"
   },
   "files": [
-    "mcodex",
-    "mcode-quota-doctor",
-    "mcodex-push-remote",
+    "mcode-hub",
+    "mcode-hub-install",
+    "mcode-hub-doctor",
+    "mcode-hub-status-compact",
+    "mcode-hub-push-remote",
     "patches/",
     "tests/",
     "package.json",
@@ -30,7 +33,6 @@
     "MAINTENANCE.md",
     "CHANGELOG.md",
     "DECISIONS.md",
-    "mcodex-install",
     "AGENTS.md",
     "INSTALL.md",
     "config",

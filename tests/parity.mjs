@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // tests/parity.mjs — byte-for-byte parity between the two render paths.
 //
-// mcodex has two implementations of the same status block:
+// mcode-hub has two implementations of the same status block:
 //   * legacy  — the frozen sidecar injected into the mcode 0.3.x fork
 //               (sidecar/mcode-quota-fetcher-9f8a7b.mjs)
 //   * native  — lib/render.mjs, driven by the 0.4.0 `custom-command` config
@@ -204,7 +204,7 @@ function nativeState() {
 
 // ---------------------------------------------------------------------------
 async function main() {
-  const work = mkdtempSync(join(tmpdir(), "mcodex-parity-"));
+  const work = mkdtempSync(join(tmpdir(), "mcode-hub-parity-"));
   const dbPath = join(work, "runtime.sqlite");
   const binDir = join(work, "bin");
   execFileSync("mkdir", ["-p", binDir]);

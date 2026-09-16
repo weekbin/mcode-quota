@@ -2,6 +2,90 @@
 
 记录每次对工具集的修改。新条目加在最上面。
 
+## 2026-09-16 — v3.4.7：去掉 `mcodex` 前缀 → `mcode-hub-*`；删除 wrapper
+
+`mcode` ≥ 0.4.0 走原生 custom-command 之后,我们不再需要自己的启动
+wrapper（它只是把 argv 透传给 mcode,同一份 cli.js、同一份 config）。所以
+顺势把整套名字改了,跟 codex / 类似前缀的项目拉开距离。
+
+**入口改名**:
+
+| 旧 | 新 |
+|---|---|
+| `mcodex` (bash wrapper, 删) | — |
+| `mcodex-install` | `mcode-hub-install` |
+| `mcodex-status` (mcode spawn 的脚本) | `mcode-hub` |
+| `mcodex-status-compact` | `mcode-hub-status-compact` |
+| `mcode-quota-doctor` | `mcode-hub-doctor` |
+| `mcodex-push-remote` | `mcode-hub-push-remote` |
+
+`mcodex install` / `mcodex uninstall` / `mcodex status` 子命令随 wrapper
+一起删掉(原本就 deprecation 中):
+- `install` → 行为合进 `mcode-hub-install`
+- `status`  → 信息合进 `mcode-hub-doctor` + `mcode-hub-install` 输出
+- `uninstall` → 没有等价物(向后:把 `~/.minimax/config.yaml` 里的 `tui:` 块手删,
+  或重装)
+
+**项目名 + 配置 schema 改名**:
+- `package.json.name`: `mcode-quota` → `mcode-hub`
+- 配置 YAML 块: `tui.mcodex` → `tui.mcode-hub`
+- 备份后缀: `.mcodex-backup` → `.mcode-hub-backup`
+- cache dir: `~/.cache/mcodex` → `~/.cache/mcode-hub`
+- fork base: `~/.local/share/mcode-quota/mcode-clone` → `~/.local/share/mcode-hub/mcode-clone`
+
+**install 脚本的 bootstrap**:
+旧版 `mcode-hub-install` 最后一步是 `$BIN_DIR/mcode-hub --version`,由 wrapper
+触发 `applyStatuslineConfig` + 写 options 块。新版 wrapper 删了,bootstrap
+**内联进** install 脚本,按 `MCODE_KIND` 分流:
+- `native` (≥ 0.4.0): 直接调 `applyStatuslineConfig` + `applyMcodexOptions`
+- `legacy`  (< 0.4.0): 直接调 `patches/_loader.mjs` 构建 fork
+- 都在 install 进程里跑,bash 3.2 (macOS 默认) 兼容
+
+**PATH 入口**:
+旧版 install 在 `~/.minimax/bin/mcodex` 建 symlink (wrapper)。
+新版改为 `~/.minimax/bin/mcode-hub-install` — 因为 renderer (`mcode-hub`)
+是被 mcode 通过 config 里的绝对路径拉起的,**不需要** PATH 入口。
+
+**改动**:
+- 文件 5 重命名 / 1 删除 (`git mv`/`git rm`,保留历史)
+- `lib/config-apply.mjs`: `MCODEX_KEY = "mcode-hub"`、`backup` 后缀
+- `lib/options.mjs`: 解析 `tui.mcode-hub` 块
+- `lib/data.mjs`: `CACHE_DIR` 默认值
+- `lib/render.mjs` / `lib/config-apply.mjs` / `lib/options.mjs`: 注释
+- `config/0.4.0/tui.statusline.yaml`: 块名 + `command: <repo>/mcode-hub`
+- `patches/_loader.mjs` / `patches/0.3.{10,11}/`: log 前缀、CLI_MARKER、注释
+- `sidecar/*`: 注释
+- `package.json`: `name` / `bin` / `scripts` / `files` 全量重写
+- 文档 (`AGENTS.md` / `ARCHITECTURE.md` / `INSTALL.md` /
+  `MAINTENANCE.md` / `README.md` / `RELEASE-v3.4.md` / `tests/README.md`):
+  全文当前态描述同步重写
+- `CHANGELOG.md` / `DECISIONS.md`: **不动** —— 历史快照
+
+**未触碰**:
+- `~/.cache/mcodex`、`~/.local/share/mcode-quota/mcode-clone` 等运行时路径
+  里的旧数据**不会自动迁移**。手动搬或 `rm -rf` 都行(里面只有 cache + fork
+  副本,重建代价小)
+- 环境变量(`MCODEX_CACHE_DIR` / `MCODE_QUOTA_*`)保持原名,后续单独 v3.4.8
+  统一改名时再处理
+
+**迁移步骤**(已有 v3.4.6 装机的用户):
+```
+cd <repo>
+git pull
+./mcode-hub-install            # 重新跑一次,会更新 config.yaml 的 command + 写 tui.mcode-hub 块
+./mcode-hub-doctor             # 16 ok, 0 failures 算过
+# 清理旧 wrapper symlink (如有):
+rm ~/.minimax/bin/mcodex
+```
+
+**验证**:
+- `tests/parity.mjs`: 19/19
+- `tests/mcode-smoke.mjs`: 106/106
+- `tests/options-smoke.mjs`: 107/107
+- `mcode-hub-doctor` (real config, install 后): 16 ok, 0 warnings, 0 failures
+- `bash -n` 所有 bash 脚本通过 (macOS bash 3.2 兼容)
+- 真实 `~/.minimax/config.yaml` install/uninstall 循环: byte-identical 恢复
+
 ## 2026-09-16 — v3.4.6：状态栏改造 — category registry + `tui.mcodex` 配置面板
 
 把"哪些行渲染"从硬编码搬进一个统一的入口 —— `ROW_CATEGORIES` registry

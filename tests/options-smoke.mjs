@@ -1,14 +1,14 @@
 #!/usr/bin/env node
 // tests/options-smoke.mjs — exhaustive smoke test for v3.4.6 (category registry
-// + tui.mcodex options). Independent of any mcode install — drives the
-// renderer / parser / apply directly and via mcodex-status subprocess.
+// + tui.mcode-hub options). Independent of any mcode install — drives the
+// renderer / parser / apply directly and via mcode-hub subprocess.
 //
 // Sections:
 //   A  renderer matrix         (3 booleans × decimals × tailMode × widths)
 //   B  parser edge cases       (~12 scenarios on synthetic YAML)
 //   C  config-apply round-trip (idempotency, backup, surrounding content)
-//   D  end-to-end              (mcodex-status subprocess)
-//   E  mcodex wrapper paths    (status / install / uninstall)
+//   D  end-to-end              (mcode-hub subprocess)
+//   E  mcode-hub install paths (bootstrap inline, status / install / uninstall)
 //   F  regression              (parity + mcode-smoke + real-config safety)
 
 import { execFileSync, spawnSync } from "node:child_process";
@@ -151,7 +151,7 @@ check(stripAnsi(hit0).includes("99%"),    "renderCacheHitChunk direct: 0 decimal
 // =============================================================================
 group("B  parser edge cases");
 
-const tmpB = mkdtempSync(join(tmpdir(), "mcodex-opt-B-"));
+const tmpB = mkdtempSync(join(tmpdir(), "mcode-hub-opt-B-"));
 const writeCfg = (name, body) => {
   const p = join(tmpB, name);
   writeFileSync(p, body);
@@ -165,7 +165,7 @@ const cases = [
   ["no-tui",           writeCfg("notui.yaml",          "provider:\n  - x\n"), { row4chunks: true, quotaRow: true, todayRow: true }, "auto", 2],
   ["no-mcodex",        writeCfg("nomc.yaml",           "tui:\n  statusLine: [custom-command]\n"), { row4chunks: true, quotaRow: true, todayRow: true }, "auto", 2],
   ["full-block",       writeCfg("full.yaml", `tui:
-  mcodex:
+  mcode-hub:
     enabled:
       row4chunks: true
       quotaRow: false
@@ -175,7 +175,7 @@ const cases = [
 `), { row4chunks: true, quotaRow: false, todayRow: true }, "full", 3],
   ["comments-only",    writeCfg("comments.yaml", `tui:
   # leading comment
-  mcodex:
+  mcode-hub:
     # inline
     enabled:
       row4chunks: true
@@ -185,7 +185,7 @@ const cases = [
     decimals: 2
 `), { row4chunks: true, quotaRow: true, todayRow: true }, "auto", 2],
   ["unknown-cat",      writeCfg("unknown.yaml", `tui:
-  mcodex:
+  mcode-hub:
     enabled:
       row4chunks: true
       quotaRow: true
@@ -195,15 +195,15 @@ const cases = [
     decimals: 2
 `), { row4chunks: true, quotaRow: true, todayRow: true }, "auto", 2],
   ["bad-tailmode",     writeCfg("badtm.yaml",  `tui:
-  mcodex:
+  mcode-hub:
     tailMode: bogus
 `), { row4chunks: true, quotaRow: true, todayRow: true }, "auto", 2],
   ["bad-decimals",     writeCfg("baddc.yaml",  `tui:
-  mcodex:
+  mcode-hub:
     decimals: 99
 `), { row4chunks: true, quotaRow: true, todayRow: true }, "auto", 2],
   ["quoted-bools",     writeCfg("qb.yaml", `tui:
-  mcodex:
+  mcode-hub:
     enabled:
       row4chunks: "true"
       quotaRow: "off"
@@ -212,12 +212,12 @@ const cases = [
   ["deep-nesting-ok",  writeCfg("deep.yaml", `tui:
   something_else:
     x: 1
-  mcodex:
+  mcode-hub:
     enabled:
       quotaRow: false
 `), { row4chunks: true, quotaRow: false, todayRow: true }, "auto", 2],
   ["mcodex-misindent", writeCfg("mi.yaml", `tui:
-    mcodex:
+    mcode-hub:
       enabled:
         row4chunks: false
 `), { row4chunks: true, quotaRow: true, todayRow: true }, "auto", 2],
@@ -241,7 +241,7 @@ rmSync(tmpB, { recursive: true, force: true });
 // =============================================================================
 group("C  config-apply round-trip");
 
-const tmpC = mkdtempSync(join(tmpdir(), "mcodex-opt-C-"));
+const tmpC = mkdtempSync(join(tmpdir(), "mcode-hub-opt-C-"));
 
 // C1: empty file → apply writes default block, second apply no-op.
 const c1 = join(tmpC, "c1.yaml");
@@ -250,7 +250,7 @@ const c1a = applyMcodexOptions(c1, {});
 const c1b = applyMcodexOptions(c1, {});
 check(c1a.changed === true, "apply to empty file writes defaults (changed: true)");
 check(c1b.changed === false, "second apply with same opts is no-op");
-check(readFileSync(c1, "utf-8").includes("mcodex:"), "block is in the file");
+check(readFileSync(c1, "utf-8").includes("mcode-hub:"), "block is in the file");
 
 // C2: overrides round-trip through parser.
 const c2 = join(tmpC, "c2.yaml");
@@ -270,7 +270,7 @@ writeFileSync(c3, `provider:
 tui:
   statusLine: [custom-command]
   customStatusLine:
-    command: /usr/local/bin/mcodex-status
+    command: /usr/local/bin/mcode-hub
     maxLines: 3
     intervalSeconds: 10
     timeoutMs: 5000
@@ -289,16 +289,16 @@ const c3after = readFileSync(c3, "utf-8");
 check(c3after.includes("provider:"), "provider block preserved");
 check(c3after.includes("apiKey: secret-abc"), "secret-bearing lines preserved verbatim");
 check(c3after.includes("statusLine: [custom-command]"), "statusLine list preserved");
-check(c3after.includes("command: /usr/local/bin/mcodex-status"), "customStatusLine preserved");
+check(c3after.includes("command: /usr/local/bin/mcode-hub"), "customStatusLine preserved");
 check(c3after.includes("# hand-tuned user comment block"), "user comments preserved");
 check(c3after.includes("language: zh-CN"), "user_pref block preserved");
-check(c3after.includes("mcodex:"), "mcodex block added");
+check(c3after.includes("mcode-hub:"), "mcode-hub block added");
 check(c3after.endsWith("\n"), "trailing newline preserved");
 
 // C4a: parser alone — lenient interpretation of malformed values.
 const c4a = join(tmpC, "c4a.yaml");
 writeFileSync(c4a, `tui:
-  mcodex:
+  mcode-hub:
     enabled:
       row4chunks: maybe
       quotaRow: "off"
@@ -318,7 +318,7 @@ check(c4aParsed.decimals === 2,              "parser leniency: out-of-range deci
 // on-disk garbage).
 const c4b = join(tmpC, "c4b.yaml");
 writeFileSync(c4b, `tui:
-  mcodex:
+  mcode-hub:
     enabled:
       quotaRow: "off"
     tailMode: bogus
@@ -333,20 +333,20 @@ check(c4bParsed.enabled.row4chunks === true && c4bParsed.enabled.quotaRow === tr
 
 // C5: remove is idempotent and surrounding content is byte-stable elsewhere.
 const c5 = join(tmpC, "c5.yaml");
-writeFileSync(c5, "tui:\n  statusLine: []\n  mcodex:\n    enabled:\n      row4chunks: true\n");
+writeFileSync(c5, "tui:\n  statusLine: []\n  mcode-hub:\n    enabled:\n      row4chunks: true\n");
 const c5before = readFileSync(c5, "utf-8");
 const c5r1 = removeMcodexOptions(c5);
 const c5mid = readFileSync(c5, "utf-8");
 const c5r2 = removeMcodexOptions(c5);
 check(c5r1.changed, "first remove reports changed");
 check(!c5r2.changed, "second remove is no-op");
-check(!c5mid.includes("mcodex:"), "mcodex block gone");
+check(!c5mid.includes("mcode-hub:"), "mcode-hub block gone");
 check(c5mid.includes("statusLine: []"), "statusLine preserved");
 
 // C6: backup written only once across multiple applies.
 const c6 = join(tmpC, "c6.yaml");
 writeFileSync(c6, "tui:\n  statusLine: []\n");
-const c6backup = c6 + ".mcodex-backup";
+const c6backup = c6 + ".mcode-hub-backup";
 applyMcodexOptions(c6, {});
 check(existsSync(c6backup), "first apply creates backup");
 const c6backupContent1 = readFileSync(c6backup, "utf-8");
@@ -366,17 +366,17 @@ writeFileSync(c8, "provider:\n  - x\n");
 applyMcodexOptions(c8, {});
 const c8content = readFileSync(c8, "utf-8");
 check(c8content.includes("provider:"), "apply w/o tui preserves provider block");
-check(c8content.includes("mcodex:"),   "apply w/o tui creates tui: + mcodex block");
+check(c8content.includes("mcode-hub:"),   "apply w/o tui creates tui: + mcode-hub block");
 
 rmSync(tmpC, { recursive: true, force: true });
 
 // =============================================================================
-// Section D — end-to-end via mcodex-status subprocess
+// Section D — end-to-end via mcode-hub subprocess
 // =============================================================================
-group("D  end-to-end via mcodex-status");
+group("D  end-to-end via mcode-hub");
 
-const STATUS_BIN = join(PROJECT_ROOT, "mcodex-status");
-const tmpD = mkdtempSync(join(tmpdir(), "mcodex-opt-D-"));
+const STATUS_BIN = join(PROJECT_ROOT, "mcode-hub");
+const tmpD = mkdtempSync(join(tmpdir(), "mcode-hub-opt-D-"));
 
 const invokeStatus = (configPath, payload = {}) => {
   const body = JSON.stringify({
@@ -394,7 +394,7 @@ const invokeStatus = (configPath, payload = {}) => {
 // D1: config with all categories on → 3 placeholder rows (no session).
 const d1cfg = join(tmpD, "d1.yaml");
 writeFileSync(d1cfg, `tui:
-  mcodex:
+  mcode-hub:
     enabled:
       row4chunks: true
       quotaRow: true
@@ -408,7 +408,7 @@ check(d1[0].includes("会话 tokens"), "D1 row1 is the 4-chunk row");
 // D2: only quotaRow on → no 会话 tokens / no 今日 anywhere.
 const d2cfg = join(tmpD, "d2.yaml");
 writeFileSync(d2cfg, `tui:
-  mcodex:
+  mcode-hub:
     enabled:
       row4chunks: false
       quotaRow: true
@@ -424,7 +424,7 @@ check(!d2HasSession && !d2HasToday,
 // D3: change config between invocations → effect visible immediately.
 const d3cfg = join(tmpD, "d3.yaml");
 writeFileSync(d3cfg, `tui:
-  mcodex:
+  mcode-hub:
     enabled:
       row4chunks: true
       quotaRow: true
@@ -433,7 +433,7 @@ writeFileSync(d3cfg, `tui:
 const d3a = invokeStatus(d3cfg);
 const d3rows1 = d3a.length;
 writeFileSync(d3cfg, `tui:
-  mcodex:
+  mcode-hub:
     enabled:
       row4chunks: false
       quotaRow: false
@@ -453,28 +453,17 @@ check(Array.isArray(d4), "D4 missing config — script still exits cleanly");
 rmSync(tmpD, { recursive: true, force: true });
 
 // =============================================================================
-// Section E — mcodex wrapper paths (bash)
+// Section E — mcode-hub install paths (no wrapper since v3.4.7)
 // =============================================================================
-group("E  mcodex wrapper");
+group("E  mcode-hub install paths");
 
-const eTmp = mkdtempSync(join(tmpdir(), "mcodex-opt-E-"));
+const eTmp = mkdtempSync(join(tmpdir(), "mcode-hub-opt-E-"));
 const eCfg = join(eTmp, "config.yaml");
 writeFileSync(eCfg, "tui:\n  statusLine: [custom-command]\n");
 
-// E1: status command reflects toggles (uses current real config; here we test
-// the apply→status round-trip with a sandboxed fake config via MCODE_CONFIG_YAML).
-const eStatus = (cfgPath) => {
-  const env = { ...process.env, MCODE_CONFIG_YAML: cfgPath,
-    PATH: process.env.PATH, HOME: process.env.HOME };
-  return execFileSync("bash", [join(PROJECT_ROOT, "mcodex"), "status"],
-    { encoding: "utf-8", env }).split("\n");
-};
-
-// We can't fully exercise mcodex status without a real mcode install in
-// PATH. Instead test the lib/options round-trip via direct invocation, and
-// the bash-level structure of the status print.
+// E1: parser picks up values from a config the install would write.
 writeFileSync(eCfg, `tui:
-  mcodex:
+  mcode-hub:
     enabled:
       row4chunks: true
       quotaRow: false
@@ -488,22 +477,38 @@ check(eParsed.tailMode === "full",        "E1 parser picks up tailMode=full");
 check(eParsed.decimals === 1,             "E1 parser picks up decimals=1");
 
 // E2: install path — verify the bash apply block invokes both functions
-// (we can't run install here without a real mcodex PATH setup, so we
+// (we can't run install here without a real mcode-hub-install PATH setup, so we
 // verify the inline node script the bash uses).
 {
   const fakeCfg = join(eTmp, "install-target.yaml");
   writeFileSync(fakeCfg, "tui:\n  statusLine: []\n");
-  // Inline-replicate what mcodex install does for native_apply:
+  // Inline-replicate what mcode-hub-install does for the bootstrap:
   const r1 = applyStatuslineConfig(fakeCfg, {
-    command: "/x/mcodex-status", maxLines: 3, intervalSeconds: 10,
+    command: "/x/mcode-hub", maxLines: 3, intervalSeconds: 10,
     timeoutMs: 5000, position: "below", colorMode: "ansi",
   });
   const r2 = applyMcodexOptions(fakeCfg, {});
   const content = readFileSync(fakeCfg, "utf-8");
   check(r1.changed && r2.changed, "E2 install apply sequence: both blocks written");
-  check(content.includes("customStatusLine:") && content.includes("mcodex:"),
-    "E2 install: both blocks coexist in tui:");
+  check(content.includes("customStatusLine:") && content.includes("mcode-hub:"),
+    "E2 install: both blocks coexist in tui:",
+    content.split("\n").filter((l) => l.startsWith("  ") && l.includes(":")).join(" | "));
+  check(content.includes("command: /x/mcode-hub"),
+    "E2 install: customStatusLine points at mcode-hub (not mcodex-status)");
 }
+
+// E3: the renamed files actually exist on disk (sanity for the rename).
+for (const f of [
+  "mcode-hub", "mcode-hub-install", "mcode-hub-doctor",
+  "mcode-hub-status-compact", "mcode-hub-push-remote",
+]) {
+  check(existsSync(join(PROJECT_ROOT, f)),
+    `E3 entry-point exists: ${f}`);
+}
+check(!existsSync(join(PROJECT_ROOT, "mcodex")),
+  "E3 the old wrapper is gone");
+check(!existsSync(join(PROJECT_ROOT, "mcodex-status")),
+  "E3 the old renderer script is gone");
 rmSync(eTmp, { recursive: true, force: true });
 
 // =============================================================================
@@ -514,7 +519,7 @@ group("F  regression");
 // F1: real ~/.minimax/config.yaml — apply defaults, compare byte-stable.
 const realCfg = `${process.env.HOME}/.minimax/config.yaml`;
 if (existsSync(realCfg)) {
-  const realBackup = realCfg + ".mcodex-smoke-backup";
+  const realBackup = realCfg + ".mcode-hub-smoke-backup";
   copyFileSync(realCfg, realBackup);
   const realBefore = readFileSync(realCfg, "utf-8");
   applyMcodexOptions(realCfg, {});

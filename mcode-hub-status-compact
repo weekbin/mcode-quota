@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// mcodex-status-compact — 1-line, narrow-screen variant of mcodex-status.
+// mcode-hub-status-compact — 1-line, narrow-screen variant of mcode-hub.
 //
 // v2: now measures the actual terminal width itself (via tput cols / TIOCGWINSZ)
 // and degrades the line before it ever reaches mcode, so mcode's own

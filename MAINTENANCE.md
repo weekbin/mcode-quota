@@ -1,4 +1,4 @@
-# mcodex — 维护指南
+# mcode-hub — 维护指南
 
 ## 1. TL;DR
 
@@ -7,47 +7,47 @@
 mcode update
 
 # 直接启动（自动重建 fork）
-mcodex
+mcode-hub
 
 # 自检
-/home/weekbin/orca/projects/mcode/mcode-quota/mcode-quota-doctor
+/home/weekbin/orca/projects/mcode/mcode-hub/mcode-hub-doctor
 
 # 启动实测
-mcodex
+mcode-hub
 ```
 
-绝大多数情况下**不需要手动跑 patcher** —— `mcodex` 每次启动都会做幂等检查。
+绝大多数情况下**不需要手动跑 patcher** —— `mcode-hub` 每次启动都会做幂等检查。
 
 ---
 
 ## 1.5 原生路径（mcode >= 0.4.0）—— 日常大多数情况
 
 ```bash
-mcodex status      # 看当前策略 / 配置是否就位
-mcodex install     # 写入/刷新 config.yaml（幂等）
-mcodex uninstall   # 移除我们的两个键（往返字节级一致）
-mcodex doctor      # 自检
+mcode-hub status      # 看当前策略 / 配置是否就位
+mcode-hub install     # 写入/刷新 config.yaml（幂等）
+mcode-hub uninstall   # 移除我们的两个键（往返字节级一致）
+mcode-hub doctor      # 自检
 ```
 
 排障顺序：
 
 1. **状态栏没有我们的 3 行**
-   - `mcodex status` 看 `config applied`。否 → `mcodex install`。
+   - `mcode-hub status` 看 `config applied`。否 → `mcode-hub install`。
    - 确认 `tui.statusLine` 里有 `custom-command`，且 `tui.customStatusLine.command`
      指向一个**可执行**文件。
    - 手动跑一次，看它到底输出什么：
      ```bash
-     printf '{"protocol":1,"event":"interval","session_id":"<某个 mvs_…>","workspace_dir":"/tmp","model":"-","tui_version":"0.4.0"}\n' | COLUMNS=200 ./mcodex-status
+     printf '{"protocol":1,"event":"interval","session_id":"<某个 mvs_…>","workspace_dir":"/tmp","model":"-","tui_version":"0.4.0"}\n' | COLUMNS=200 ./mcode-hub
      ```
      有输出 → 问题在 mcode 侧（配置没生效/被覆盖）；无输出 → 见下一条。
    - `MCODEX_STATUS_DEBUG=1` 再跑一次，stderr 会说明是取数失败还是渲染失败。
 
 2. **只有部分行**（例如缺 5h/周）
    - 那是 mmx 的问题：`mmx quota show --output json --quiet` 手动跑一次。
-   - 配额与今日统计各有 60s 文件缓存，清掉 `~/.cache/mcodex/` 可强制刷新。
+   - 配额与今日统计各有 60s 文件缓存，清掉 `~/.cache/mcode-hub/` 可强制刷新。
 
 3. **数字不对**
-   - 先清 `~/.cache/mcodex/` 重试。
+   - 先清 `~/.cache/mcode-hub/` 重试。
    - 会话 token 很小 → 检查 sqlite 是否有该 session 的 `local_runtime_token_usage`。
    - 上下文百分比与 mcode 原生 `Context N% left` 不互补 → 取该 session 最新
      assistant 行的 `context_usage` 对比：
@@ -58,7 +58,7 @@ mcodex doctor      # 自检
      ```
 
 4. **改完 config 想还原**
-   - `mcodex uninstall`，或恢复一次性备份 `~/.minimax/config.yaml.mcodex-backup`。
+   - `mcode-hub uninstall`，或恢复一次性备份 `~/.minimax/config.yaml.mcode-hub-backup`。
 
 ---
 
@@ -74,13 +74,13 @@ mcode 官方安装（只读，0 字节修改）
         │
         │  只读
         ▼
-~/.minimax/config.yaml          ← mcodex 合并两个键（文本级，保留注释）
+~/.minimax/config.yaml          ← mcode-hub 合并两个键（文本级，保留注释）
   tui.statusLine += custom-command
-  tui.customStatusLine.command = <repo>/mcodex-status
+  tui.customStatusLine.command = <repo>/mcode-hub
         │
         │  mcode 在 startup / session 切换 / 每 10s 调用
         ▼
-  <repo>/mcodex-status   ← stdin JSON(session_id/model/…) → 3 行到 stdout
+  <repo>/mcode-hub   ← stdin JSON(session_id/model/…) → 3 行到 stdout
         │
         ├─ lib/data.mjs    读 sqlite + mmx（各带 60s 文件缓存）
         └─ lib/render.mjs  纯渲染
@@ -90,7 +90,7 @@ mcode 官方安装（只读，0 字节修改）
 
 ```
 mcode 官方安装（只读）          私有 fork（可随时删）
-~/.minimax-code/releases/<v>/   ~/.local/share/mcode-quota/mcode-clone/<v>/code/
+~/.minimax-code/releases/<v>/   ~/.local/share/mcode-hub/mcode-clone/<v>/code/
    lib/.../chunks/launcher.js      cli.js            ← 静态 import sidecar
         │                          chunks/launcher.js ← render() 覆盖
         └──── 从不写入 ────────────┘
@@ -98,15 +98,15 @@ mcode 官方安装（只读）          私有 fork（可随时删）
                     sidecar（项目目录）← 懒启动：第一次渲染才 fork mmx
 ```
 
-- 入口：`~/.minimax/bin/mcodex`（**软链接**到项目目录的 `mcodex`，脚本会跟随软链解路径）
-- 自检：`mcode-quota-doctor`（按版本自动选对应的一组检查）
+- 入口：`~/.minimax/bin/mcode-hub-install`（**软链接**到项目目录的 `mcode-hub`，脚本会跟随软链解路径）
+- 自检：`mcode-hub-doctor`（按版本自动选对应的一组检查）
 - 渲染核心：两条路径共用 `lib/render.mjs`，由 `tests/parity.mjs` 逐字节锁定一致
 
 ---
 
 ## 3. mcode 版本升级时我们的动作
 
-**一句话**：`mcode update && mcodex install && mcodex doctor`。绝大多数情况
+**一句话**：`mcode update && mcode-hub install && mcode-hub doctor`。绝大多数情况
 到此为止 —— 如果升级没跨过 0.4.0 这条线，连 `install` 都不需要。
 
 下面按「升级前 / 升级后 / 需要写代码时」三段说清楚。
@@ -115,7 +115,7 @@ mcode 官方安装（只读）          私有 fork（可随时删）
 
 ```bash
 cat ~/.minimax-code/current        # 当前版本
-mcodex status                      # 当前用的哪条策略
+mcode-hub status                      # 当前用的哪条策略
 ```
 
 | 当前版本 | 策略 | 升级到 | 要做什么 |
@@ -129,8 +129,8 @@ mcodex status                      # 当前用的哪条策略
 
 ```bash
 mcode update          # 升级 mcode 本体
-mcodex install        # 幂等刷新 config.yaml（会自愈被覆盖的配置）
-mcodex doctor         # 期望 18 ok, 0 warnings, 0 failures
+mcode-hub install        # 幂等刷新 config.yaml（会自愈被覆盖的配置）
+mcode-hub doctor         # 期望 18 ok, 0 warnings, 0 failures
 ```
 
 **为什么多半不用改代码**：我们只依赖 mcode 的**配置 schema**
@@ -142,23 +142,23 @@ mcodex doctor         # 期望 18 ok, 0 warnings, 0 failures
 
 1. **状态栏完全没有我们的 3 行**
    ```bash
-   mcodex status                 # config applied 是 yes 吗
-   mcodex install                # 不是就装上
+   mcode-hub status                 # config applied 是 yes 吗
+   mcode-hub install                # 不是就装上
    ```
-   还是不行 → `mcodex doctor`，看 `statusLine includes custom-command` 与
+   还是不行 → `mcode-hub doctor`，看 `statusLine includes custom-command` 与
    `customStatusLine.command executable` 两项。
 
 2. **有 3 行但内容不对 / 缺行**
    ```bash
    # 手动喂一次 payload，看脚本自己输出什么
    printf '{"protocol":1,"event":"interval","session_id":"<某个 mvs_…>","workspace_dir":"/tmp","model":"-","tui_version":"0.4.0"}\n' \
-     | COLUMNS=200 ./mcodex-status
+     | COLUMNS=200 ./mcode-hub
    ```
    有输出 → 问题在 mcode 侧（配置没生效）；没输出 → 加
    `MCODEX_STATUS_DEBUG=1` 看 stderr。
 
 3. **配置被 mcode 重写了**（例如它自己的 setup 流程重建了 config.yaml）
-   - `mcodex install` 会重新合并。我们只动自己那两个键，文本级编辑。
+   - `mcode-hub install` 会重新合并。我们只动自己那两个键，文本级编辑。
 
 4. **`maxLines` / `position` 语义变了**
    - 查 mcode 版本自带的 `CHANGELOG.md`，搜 `customStatusLine`。
@@ -176,17 +176,17 @@ mcodex doctor         # 期望 18 ok, 0 warnings, 0 failures
 
 ```bash
 mcode update            # 升到 ≥ 0.4.0
-mcodex status           # 应显示 strategy: native custom-command
-mcodex install          # 写入 config.yaml
-mcodex doctor           # 18/0/0
-./mcodex                # 或直接跑 mcode，确认 3 行都在
+mcode-hub status           # 应显示 strategy: native custom-command
+mcode-hub install          # 写入 config.yaml
+mcode-hub doctor           # 18/0/0
+./mcode-hub                # 或直接跑 mcode，确认 3 行都在
 ```
 
 切换后可以清掉 fork 释放空间（确认新路径正常之后再做）：
 
 ```bash
 # 只删 fork 与 pristine 缓存，不动 mcode 本体
-du -sh ~/.local/share/mcode-quota/mcode-clone
+du -sh ~/.local/share/mcode-hub/mcode-clone
 # 逐版本删，例如：
 #   0.4.0 及以后的 fork 不再需要
 ```
@@ -200,8 +200,8 @@ fork 路径靠 **AST 推导锚点**（不锁类名/字段名），所以小版�
 
 ```bash
 mcode update
-mcodex                 # 会自动重建 fork 并重打补丁
-mcodex doctor          # 看 fork launcher render hook present 等项
+mcode-hub                 # 会自动重建 fork 并重打补丁
+mcode-hub doctor          # 看 fork launcher render hook present 等项
 ```
 
 **只有当 widget 结构真的变了**，才需要新增 `patches/<新版本>/`：
@@ -224,7 +224,7 @@ MCODE_FIND_ANCHORS_DEBUG=1 node mcode-find-anchors.mjs \
 ```bash
 node tests/parity.mjs        # 新旧渲染逐字节一致（19 项）
 node tests/mcode-smoke.mjs   # 行为回归（87 项）
-./mcode-quota-doctor         # 端到端自检
+./mcode-hub-doctor         # 端到端自检
 ```
 
 `parity.mjs` 是**跨策略的护栏**：只要它绿，两条路径就显示同样的东西。
@@ -233,12 +233,12 @@ node tests/mcode-smoke.mjs   # 行为回归（87 项）
 ### 3.6 版本升级后的最小验收
 
 ```
-[ ] mcodex status      -> strategy 与预期一致
-[ ] mcodex doctor      -> 0 failures
+[ ] mcode-hub status      -> strategy 与预期一致
+[ ] mcode-hub doctor      -> 0 failures
 [ ] 真实跑一次 mcode   -> 3 行都在，颜色正常
 [ ] 切一次 session     -> 立刻重绘（不等 10s）
-[ ] picker 屏也能看到底栏（v3.3.3+）-> `mcodex-status` 在 !sessionId 时
-    必须仍然输出 3 行（line 1 dim 占位，line 2/3 真实数据），mcodex
+[ ] picker 屏也能看到底栏（v3.3.3+）-> `mcode-hub` 在 !sessionId 时
+    必须仍然输出 3 行（line 1 dim 占位，line 2/3 真实数据），mcode-hub
     doctor 验不出这个，必须肉眼跑 `mcode` 看 picker 屏
 ```
 
@@ -248,29 +248,29 @@ node tests/mcode-smoke.mjs   # 行为回归（87 项）
 
 | 现象 | 原因 | 处理 |
 |---|---|---|
-| `mcodex` 启动后是**原版界面**（无 quota 行） | patcher 失败已回退 | `MCODE_QUOTA_DEBUG=1 mcodex` 看 stderr |
+| `mcode-hub` 启动后是**原版界面**（无 quota 行） | patcher 失败已回退 | `MCODE_QUOTA_DEBUG=1 mcode-hub` 看 stderr |
 | quota 行完全不显示 | sidecar 未加载 / fork 未建 | 跑 doctor；确认 `fork cli.js imports sidecar` 为 ok |
 | 只有会话 tokens，无 5小时/周 | `mmx` 不在 PATH 或未登录 | `which mmx`；`mmx auth status` |
 | 无 上下文 字段 | 该会话还没产生 `contextSnapshot`（新会话、或 runtime 未就绪） | 正常；跑完一个 turn 后自动出现。doctor 用合成快照单独验证该路径 |
 | 上下文百分比与 `/context` 对不上 | 两者取数时点不同（这里是渲染时实时读 shellState） | 以 `/context` 详情为准，差异应在一次渲染周期内收敛 |
 | 会话 tokens 恒为 0 | runtime 与 sqlite 都无该会话数据 | 确认会话有完成的 turn；`SELECT * FROM local_runtime_token_usage WHERE session_id=...` |
 | doctor 报 `mcode launcher is PATCHED` | 历史遗留污染 | 用 npm tarball 覆盖该 launcher（见 §6） |
-| doctor 报 fork 相关 FAIL | fork 半成品 | 删掉 fork 目录，重跑 `mcodex` |
+| doctor 报 fork 相关 FAIL | fork 半成品 | 删掉 fork 目录，重跑 `mcode-hub` |
 | 进度条颜色不显示 | 终端不支持 24-bit | 设置 `COLORTERM=truecolor` 或换终端 |
 | 升级后锚点找不到 | mcode 大重构 | §5 重派生 |
-| **`mcode` plain（picker 屏）底栏消失；`mcode -c` 正常** | mcode ≥ 0.4.0 的 `va` StatusLine 渲染规则（`launcher-*:209`）在 custom-command 输出空时**整条底栏**不画（连同 `current-dir` / `model` / `git-branch`）；`mcodex-status` 旧版在 `!sessionId` 时早 return → 整条底栏空。**与 mcode 进程版本、是否重启都无关**——退出所有 mcode 进程后差异仍存在 | 先 `mcodex install` 同步到 ≥ v3.3.3；手工 `echo '{}' \| mcodex-status` 验 3 行（line 1 应是 dim 占位符 `会话 tokens … │ 上下文 … │ 缓存命中 … │ 轮数 …`，line 2/3 是真实 5h·周 / 今日）。**注意 `mcodex doctor` 验不出这个**（doctor 走 `mcode -c` 路径永远带 sessionId） |
+| **`mcode` plain（picker 屏）底栏消失；`mcode -c` 正常** | mcode ≥ 0.4.0 的 `va` StatusLine 渲染规则（`launcher-*:209`）在 custom-command 输出空时**整条底栏**不画（连同 `current-dir` / `model` / `git-branch`）；`mcode-hub` 旧版在 `!sessionId` 时早 return → 整条底栏空。**与 mcode 进程版本、是否重启都无关**——退出所有 mcode 进程后差异仍存在 | 先 `mcode-hub install` 同步到 ≥ v3.3.3；手工 `echo '{}' \| mcode-hub` 验 3 行（line 1 应是 dim 占位符 `会话 tokens … │ 上下文 … │ 缓存命中 … │ 轮数 …`，line 2/3 是真实 5h·周 / 今日）。**注意 `mcode-hub doctor` 验不出这个**（doctor 走 `mcode -c` 路径永远带 sessionId） |
 
 ### 4.1 打开诊断日志
 
 ```bash
-MCODE_QUOTA_DEBUG=1 mcodex
+MCODE_QUOTA_DEBUG=1 mcode-hub
 ```
 
 ### 4.2 强制重建 fork
 
 ```bash
-node -e 'require("fs").rmSync(process.env.HOME+"/.local/share/mcode-quota/mcode-clone/0.3.10",{recursive:true,force:true})'
-mcodex
+node -e 'require("fs").rmSync(process.env.HOME+"/.local/share/mcode-hub/mcode-clone/0.3.10",{recursive:true,force:true})'
+mcode-hub
 ```
 
 （把 `0.3.10` 换成实际版本；版本号见 `cat ~/.minimax-code/current`。）
@@ -278,7 +278,7 @@ mcodex
 ### 4.3 离线模式
 
 ```bash
-MCODE_QUOTA_OFFLINE=1 mcodex    # 只用已缓存 tarball 或已安装源码，不联网
+MCODE_QUOTA_OFFLINE=1 mcode-hub    # 只用已缓存 tarball 或已安装源码，不联网
 ```
 
 ---
@@ -289,8 +289,8 @@ patcher 报 `anchor finder failed` / `anchor parse failed` 时：
 
 ```bash
 MCODE_FIND_ANCHORS_DEBUG=1 \
-node /home/weekbin/orca/projects/mcode/mcode-quota/patches/<当前版本>/mcode-find-anchors.mjs \
-     ~/.local/share/mcode-quota/mcode-clone/<版本>/code/chunks/launcher-*.js
+node /home/weekbin/orca/projects/mcode/mcode-hub/patches/<当前版本>/mcode-find-anchors.mjs \
+     ~/.local/share/mcode-hub/mcode-clone/<版本>/code/chunks/launcher-*.js
 ```
 
 输出示例：
@@ -316,7 +316,7 @@ SHELLSTATE_PROP='shellState'
 
 ## 5.5 加新 mcode 版本（patcher 跟随升级）
 
-mcode 升级后 mcodex 跑得起来不代表 patcher 是最优的。当以下任一情况发生时
+mcode 升级后 mcode-hub 跑得起来不代表 patcher 是最优的。当以下任一情况发生时
 （应该都能从 mcode-find-anchors 输出看出来）：
 
 - `WIDGET_BODY_END` / `CTOR_END` 偏移变了
@@ -336,18 +336,18 @@ cp patches/0.3.11/mcode-find-anchors.mjs "patches/$NEW/"
 # 2. 跑 mcode 0.3.12 实际 launcher，验证 finder 还能识别
 MCODE_FIND_ANCHORS_DEBUG=1 \
   node patches/$NEW/mcode-find-anchors.mjs \
-       ~/.local/share/mcode-quota/mcode-clone/$NEW/code/chunks/launcher-*.js
+       ~/.local/share/mcode-hub/mcode-clone/$NEW/code/chunks/launcher-*.js
 
-# 3. 起一次 mcodex，确认 fork 注入成功
-mcodex --help
-mcode-quota-doctor
+# 3. 起一次 mcode-hub，确认 fork 注入成功
+mcode-hub --help
+mcode-hub-doctor
 
 # 4. 跑回归
 node tests/mcode-smoke.mjs
 
 # 5. 写 patches/$NEW/NOTES.md，记录该版本与上一版的差异
 # 6. commit + push
-./mcodex-push-remote
+./mcode-hub-push-remote
 ```
 
 **如果 patcher 不需要改**（widget 字段和偏移都没变，比如 0.3.10 → 0.3.11），
@@ -355,7 +355,7 @@ loader 也能直接走老目录——`patches/0.3.11/` 自动成为 0.3.12 的 f
 但建议还是建 `patches/0.3.12/` 并 NOTES 里说"与 0.3.11 同源"，便于回溯。
 
 **如果没建新目录 + 也没老目录 <= 当前版本**，loader 报错并列出可用版本，
-mcodex 走 fallback 分支跑**未打 patch 的官方 mcode**（不卡你）。
+mcode-hub 走 fallback 分支跑**未打 patch 的官方 mcode**（不卡你）。
 
 如果 mcode 改了这些特征，需要更新 `mcode-find-anchors.mjs` 里的特征列表。
 **patcher 本体不需要改** —— 它只消费 `WIDGET_BODY_END` / `CTOR_END` 两个偏移。
@@ -364,7 +364,7 @@ mcodex 走 fallback 分支跑**未打 patch 的官方 mcode**（不卡你）。
 
 ```bash
 node patches/_loader.mjs --fork-base=... --sidecar=... --current=<版本> --offline
-node --check ~/.local/share/mcode-quota/mcode-clone/<版本>/code/chunks/launcher-*.js
+node --check ~/.local/share/mcode-hub/mcode-clone/<版本>/code/chunks/launcher-*.js
 ```
 
 ---
@@ -376,7 +376,7 @@ node --check ~/.local/share/mcode-quota/mcode-clone/<版本>/code/chunks/launche
 
 ```bash
 V=0.3.10
-TB=~/.local/share/mcode-quota/mcode-clone/tarballs/minimax-ai-code-$V.tgz
+TB=~/.local/share/mcode-hub/mcode-clone/tarballs/minimax-ai-code-$V.tgz
 DST=~/.minimax-code/releases/$V/lib/node_modules/@minimax-ai/code
 mkdir -p /tmp/restore-$V && tar -xzf "$TB" -C /tmp/restore-$V --strip-components=1
 cp -f /tmp/restore-$V/chunks/launcher-*.js "$DST/chunks/"
@@ -384,13 +384,13 @@ cp -f /tmp/restore-$V/chunks/launcher-*.js "$DST/chunks/"
 node -e 'const fs=require("fs");const d="'"$DST"'/chunks";for(const f of fs.readdirSync(d))if(/quota|unpatched\.bak|stormquake/.test(f)){fs.unlinkSync(d+"/"+f);console.log("removed",f)}'
 ```
 
-然后 `mcode-quota-doctor` 应显示 `byte-identical to pristine npm tarball`。
+然后 `mcode-hub-doctor` 应显示 `byte-identical to pristine npm tarball`。
 
 ---
 
 ## 7. 自定义
 
-全部改动都在 `mcode-patch-quota.mjs` 的 `SIDECAR_BODY` 模板里，改完重跑 `mcodex` 即生效。
+全部改动都在 `mcode-patch-quota.mjs` 的 `SIDECAR_BODY` 模板里，改完重跑 `mcode-hub` 即生效。
 
 ### 7.1 颜色阈值
 
@@ -459,10 +459,10 @@ const L_RESET = "重置";
 
 ```bash
 # 1. 删 PATH 入口
-node -e 'require("fs").unlinkSync(process.env.HOME+"/.minimax/bin/mcodex")'
+node -e 'require("fs").unlinkSync(process.env.HOME+"/.minimax/bin/mcode-hub")'
 
 # 2. 删 fork 与缓存（约 130MB）
-node -e 'require("fs").rmSync(process.env.HOME+"/.local/share/mcode-quota",{recursive:true,force:true})'
+node -e 'require("fs").rmSync(process.env.HOME+"/.local/share/mcode-hub",{recursive:true,force:true})'
 
 # 3. 工具集本身在 git 仓库里，按需保留
 ```
@@ -474,20 +474,20 @@ mcode 本体从未被修改，卸载后 `mcode` 照常工作。
 ## 9. 已知限制
 
 - fork 每版本约 62MB 真实拷贝（换掉 realpath 陷阱）
-- sidecar 路径写死在 fork 的 `cli.js`；移动项目目录需重跑 patcher（`mcodex` 自动处理）
+- sidecar 路径写死在 fork 的 `cli.js`；移动项目目录需重跑 patcher（`mcode-hub` 自动处理）
 - `mmx` 输出 schema 变化时需更新 `fetchQuotaOnce` 里的字段名
 - `script` 伪 TTY 默认 80 列，自动化测试会看到三行紧凑布局（明细放不下）；想看单行带明细需 ≥150 列
 
 ---
 
-## 10. `mcodex` 入口 deprecation 路线图（v3.4.0 起）
+## 10. `mcode-hub` 入口 deprecation 路线图（v3.4.0 起）
 
 mcode ≥ 0.4.0（v3.3.0 起的 native `tui.customStatusLine` 路径）以来，
-mcodex **不再 fork mcode 源码**——它只剩两个职责：
+mcode-hub **不再 fork mcode 源码**——它只剩两个职责：
 
-1. **维护子命令**：`mcodex install | uninstall | status | doctor` — 仍然
+1. **维护子命令**：`mcode-hub install | uninstall | status | doctor` — 仍然
    有用，**不** deprecate
-2. **启动包装**：`mcodex`（无子命令）/`mcodex -c` 调起 mcode — 跟
+2. **启动包装**：`mcode-hub`（无子命令）/`mcode-hub -c` 调起 mcode — 跟
    `mcode` / `mcode -c` 完全等价（同一份 `cli.js`、同一份
    `~/.minimax/config.yaml`），**功能上是冗余入口**
 
@@ -495,62 +495,62 @@ mcodex **不再 fork mcode 源码**——它只剩两个职责：
 
 ### 10.1 v3.4.0（当前 release）
 
-- `mcodex` 无子命令启动 → **stderr 一行 deprecation warning**，提醒
+- `mcode-hub` 无子命令启动 → **stderr 一行 deprecation warning**，提醒
   改用 `mcode`；仍 `exec` mcode 不破坏现有用法
 - `--no-deprecation-warning` 旗标（或 `MCODEX_NO_DEPRECATION_WARNING=1`
   环境变量）可静默，给需要短期兼容旧脚本/alias 的用户
-- `mcodex install | uninstall | status | doctor` 仍静默
-- 文档改以 `mcode` 为主要启动命令；`mcodex` 只在维护语境出现
+- `mcode-hub install | uninstall | status | doctor` 仍静默
+- 文档改以 `mcode` 为主要启动命令；`mcode-hub` 只在维护语境出现
 
 ### 10.2 v3.5.0（计划）
 
-- `mcodex-install` **默认不**安装 `~/.minimax/bin/mcodex` symlink
-  —— `mcodex` PATH 入口变成 opt-in（`--with-mcodex-wrapper`）
-- 仍提供 `mcodex-install --with-mcodex-wrapper` 给需要兼容旧
+- `mcode-hub-install` **默认不**安装 `~/.minimax/bin/mcode-hub-install` symlink
+  —— `mcode-hub` PATH 入口变成 opt-in（`--with-mcode-hub-wrapper`）
+- 仍提供 `mcode-hub-install --with-mcode-hub-wrapper` 给需要兼容旧
   muscle memory 的用户（按 `--copy` 安装也可）
-- README / INSTALL / AGENTS 的"快速开始"段移除 `mcodex` PATH 入口
-- `mcodex` wrapper 脚本本身的 deprecation warning 保留
+- README / INSTALL / AGENTS 的"快速开始"段移除 `mcode-hub` PATH 入口
+- `mcode-hub` wrapper 脚本本身的 deprecation warning 保留
 
 ### 10.3 v4.0.0（目标）
 
-- 删 `mcodex` wrapper 脚本本体
-- 保留独立脚本：`mcodex-install`、`mcodex-status`、`mcodex-doctor`、
-  `mcodex-push-remote`、`mcodex-status-compact`
-- `mcodex-status` / `mcodex-doctor` 不再以子命令形式存在，要用就
-  单独跑（`./mcodex-status` 而不是 `mcodex status`）
+- 删 `mcode-hub` wrapper 脚本本体
+- 保留独立脚本：`mcode-hub-install`、`mcode-hub`、`mcode-hub-doctor`、
+  `mcode-hub-push-remote`、`mcode-hub-status-compact`
+- `mcode-hub` / `mcode-hub-doctor` 不再以子命令形式存在，要用就
+  单独跑（`./mcode-hub` 而不是 `mcode-hub status`）
 - `mcode` 是唯一的启动命令；`~/.minimax/config.yaml` 里的
   `tui.customStatusLine` 是唯一的 quota 行接线点
-- `mcodex-install` 是唯一需要 PATH 的入口（装好 symlink 后其它脚本
+- `mcode-hub-install` 是唯一需要 PATH 的入口（装好 symlink 后其它脚本
   直接通过仓库根路径调用即可）
 
 ### 10.4 为什么不是 v3.4.0 一步到位
 
-- 0.4.0+ 之后 `mcodex` wrapper 仍然承担"确保 config 落盘"这个 safety net：
+- 0.4.0+ 之后 `mcode-hub` wrapper 仍然承担"确保 config 落盘"这个 safety net：
   用户从老 release 升上来时，wrapper 的 `native_apply apply` 会把缺失的
   customStatusLine 键补回 `~/.minimax/config.yaml`，不需要用户手动
-  跑 `mcodex install`。直接拿掉 wrapper 会让"刚 mcode update 完没看到
+  跑 `mcode-hub install`。直接拿掉 wrapper 会让"刚 mcode update 完没看到
   状态栏"的用户误以为是 bug
 - 0.4.0 之前的 legacy fork 路径仍在生产使用（虽然本机已全切到 native），
   wrapper 里的 `IS_NATIVE=0` 分支还需继续工作到最后一个 0.3.x 用户迁移
-- `mcodex status` / `mcodex doctor` 是文档里大量出现的工具，删 wrapper
+- `mcode-hub status` / `mcode-hub doctor` 是文档里大量出现的工具，删 wrapper
   之前必须先把它们提到独立脚本
 
 ### 10.5 自己跑改动前的 sanity 检查
 
 ```bash
-# mcodex 启动会出 deprecation warning
-mcodex --help 2>&1 | head -1
-# 期望: mcodex: launching via this wrapper is deprecated; ...
+# mcode-hub 启动会出 deprecation warning
+mcode-hub --help 2>&1 | head -1
+# 期望: mcode-hub: launching via this wrapper is deprecated; ...
 
 # 静默旗标
-mcodex --no-deprecation-warning --help 2>&1 | head -1
+mcode-hub --no-deprecation-warning --help 2>&1 | head -1
 # 期望: Usage: mcode [options] ...（无 warning）
 
 # 维护子命令不出 warning
-mcodex status 2>&1 | grep -i deprecate
+mcode-hub status 2>&1 | grep -i deprecate
 # 期望: 空（不输出 deprecation 行）
 
 # doctor 仍绿
-mcodex doctor 2>&1 | tail -1
+mcode-hub doctor 2>&1 | tail -1
 # 期望: Result: 17 ok, 0 warnings, 0 failures
 ```

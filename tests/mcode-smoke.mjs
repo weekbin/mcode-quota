@@ -96,7 +96,7 @@ const PATCH_DIR = join(PATCHES_DIR, mcodeVersion);
 const FINDER = join(PATCH_DIR, "mcode-find-anchors.mjs");
 const PATCHER = join(PATCH_DIR, "mcode-patch-quota.mjs");
 if (!existsSync(PATCH_DIR)) {
-  console.error(`FATAL: no patches/${mcodeVersion}/ for the live launcher; run mcodex once to build it, or add the version.`);
+  console.error(`FATAL: no patches/${mcodeVersion}/ for the live launcher; run mcode-hub-install once to build it, or add the version.`);
   process.exit(2);
 }
 const PRISTINE_LAUNCHER = discoverPristineLauncher(mcodeVersion);
@@ -309,7 +309,7 @@ try {
   const cli = join(forkDir, `${mcodeVersion}/code/cli.js`);
   if (existsSync(cli)) {
     const c = readFileSync(cli, "utf-8");
-    check(c.includes("mcode-quota-sidecar"), "fork cli.js imports the sidecar");
+    check(c.includes("mcode-hub-sidecar"), "fork cli.js imports the sidecar");
   } else {
     console.log("  WARN: cli.js not present in fork (fork-only verification skipped)");
   }
@@ -445,7 +445,7 @@ try {
   }
   // ---- native path (mcode >= 0.4.0) ----
   // Above we exercised the legacy fork patcher against the newest available
-  // fork. From 0.4.0 onward mcodex stops patching entirely and drives mcode's
+  // fork. From 0.4.0 onward mcode-hub stops patching entirely and drives mcode's
   // own `custom-command` status item, so the things worth asserting change:
   // the config merge is idempotent and reversible, and the status script
   // answers a synthetic mcode payload with the 3-row contract.
@@ -470,7 +470,7 @@ try {
 
       // config merge: idempotent + reversible, on a copy of the real file
       const realConfig = `${process.env.HOME}/.minimax/config.yaml`;
-      const work = mkdtempSync(join(tmpdir(), "mcodex-cfg-"));
+      const work = mkdtempSync(join(tmpdir(), "mcode-hub-cfg-"));
       const cfg = join(work, "config.yaml");
       copyFileSync(realConfig, cfg);
       const before = readFileSync(cfg, "utf-8");
@@ -491,7 +491,7 @@ try {
       const headBefore = before.split("tui:")[0];
       const headAfter = afterApply.split("tui:")[0];
       check(headBefore === headAfter, "content above tui: is untouched");
-      check(existsSync(cfg + ".mcodex-backup"), "one-shot backup written");
+      check(existsSync(cfg + ".mcode-hub-backup"), "one-shot backup written");
 
       const r1 = removeStatuslineConfig(cfg);
       const afterRemove = readFileSync(cfg, "utf-8");
@@ -502,7 +502,7 @@ try {
       rmSync(work, { recursive: true, force: true });
 
       // status script: synthetic payload -> the 3-row contract
-      const statusBin = join(PROJECT_ROOT, "mcodex-status");
+      const statusBin = join(PROJECT_ROOT, "mcode-hub");
       if (existsSync(statusBin)) {
         const sid = (() => {
           try {
@@ -583,13 +583,13 @@ try {
       // v3.4.6 — options parser round-trips with applyMcodexOptions
       const { applyMcodexOptions, removeMcodexOptions } = await import("../lib/config-apply.mjs");
       const { loadMcodexOptions } = await import("../lib/options.mjs");
-      const optDir = mkdtempSync(join(tmpdir(), "mcodex-opts-"));
+      const optDir = mkdtempSync(join(tmpdir(), "mcode-hub-opts-"));
       tempDirs.push(optDir);
       const workCfg = join(optDir, "options.yaml");
       writeFileSync(workCfg, "tui:\n  statusLine: []\n");
       // First apply with defaults writes the block; second apply is no-op.
       check(applyMcodexOptions(workCfg, {}).changed,
-        "first apply with empty opts writes the default mcodex block");
+        "first apply with empty opts writes the default mcode-hub block");
       check(!applyMcodexOptions(workCfg, {}).changed,
         "second apply with empty opts is a no-op (defaults idempotent)");
       applyMcodexOptions(workCfg, {
@@ -606,7 +606,7 @@ try {
         enabled: { quotaRow: false, todayRow: false }, tailMode: "compact", decimals: 0,
       }).changed, "apply is idempotent on identical opts");
       // Remove
-      check(removeMcodexOptions(workCfg).changed, "remove strips the mcodex block");
+      check(removeMcodexOptions(workCfg).changed, "remove strips the mcode-hub block");
       check(loadMcodexOptions(workCfg).enabled.row4chunks === true,
         "after remove, parser returns defaults again");
       check(!removeMcodexOptions(workCfg).changed, "second remove is a no-op");

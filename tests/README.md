@@ -32,5 +32,5 @@ node tests/mcode-smoke.mjs
 
 ## 配套
 
-- `mcode-quota-doctor` 跑 live render 验证（端到端）
-- `mcodex` 第一次启动会建 fork 并 patch launcher（生产路径）
+- `mcode-hub-doctor` 跑 live render 验证（端到端）
+- `mcode-hub` 第一次启动会建 fork 并 patch launcher（生产路径）

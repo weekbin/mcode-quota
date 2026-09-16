@@ -1,8 +1,8 @@
 # mcode 0.4.0+ —— 原生 custom-command 配置载荷
 #
-# mcodex 在 0.4.0 及以后**不再修改 mcode 任何字节**。它改为把下面这段写进
+# mcode-hub 在 0.4.0 及以后**不再修改 mcode 任何字节**。它改为把下面这段写进
 # ~/.minimax/config.yaml，让 mcode 自己的 `custom-command` 状态栏项来跑我们的
-# 脚本。`mcodex install` 负责合并（文本级编辑，保留文件其余部分与注释）。
+# 脚本。`mcode-hub-install` 负责合并（文本级编辑，保留文件其余部分与注释）。
 #
 # 与原 fork 补丁的对应关系：
 #   fork 注入  render() 覆写 -> 追加 3 行
@@ -41,16 +41,16 @@ tui:
     - context-remaining
     - model
     - cache-read-ratio
-    - custom-command          # <- mcodex 追加
-  customStatusLine:           # <- mcodex 整段写入
-    command: <repo>/mcodex-status
+    - custom-command          # <- mcode-hub 追加
+  customStatusLine:           # <- mcode-hub 整段写入
+    command: <repo>/mcode-hub
     display: block
     position: below
     maxLines: 3
     intervalSeconds: 10
     timeoutMs: 5000
     colorMode: ansi
-  mcodex:                    # <- mcodex 写入（可选；整段可删）
+  mcode-hub:                  # <- mcode-hub 写入（可选；整段可删）
     # 每个 chunk 是否显示。缺省 / 不识别 = true。
     # 关闭后整行从底栏移除，渲染器不会再尝试压缩 / 占位。
     enabled:

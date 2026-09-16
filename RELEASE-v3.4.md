@@ -5,28 +5,28 @@
 ## 一句话总结
 
 mcode ≥ 0.4.0 走 **native `tui.customStatusLine` 路径**(只写 config.yaml,
-mcode 自己 spawn mcodex-status),`mcodex` wrapper 启动 deprecation;同时把
+mcode 自己 spawn mcode-hub),`mcode-hub` wrapper 启动 deprecation;同时把
 statusline 数据刷新率原则显式化:**远程 API 节流,本地 sqlite 实时**。
 
 ## 5 个 commit
 
 | # | hash | version | 主题 |
 |---|---|---|---|
-| 1 | `1b3ad23` | v3.4.0 | `mcodex` wrapper 启动-mode deprecation warning;`mcode` 成为唯一起动命令 |
+| 1 | `1b3ad23` | v3.4.0 | `mcode-hub` wrapper 启动-mode deprecation warning;`mcode` 成为唯一起动命令 |
 | 2 | `ee57118` | v3.4.1 | `fetchTodayByModel` warmed 路径 TTL early-return;省 58K-row scan + 写盘 |
 | 3 | `2e59bb7` | v3.4.2 | 轮数改 `COUNT(DISTINCT turn_id FROM local_runtime_message_rows WHERE role='user')`;剔除 mcode 内部 warmup turn |
 | 4 | `6924560` | v3.4.3 | `QUOTA_TTL_MS` 60s → 5min;`mmx quota show` 启动频次 6/min → 1/5min |
 | 5 | `3236468` | v3.4.4 | warmed 路径去掉 60s TTL 限制;本地 sqlite 实时,新 turn 下一个 10s tick 立刻反映 |
 
-## v3.4.0 — `mcodex` wrapper deprecation
+## v3.4.0 — `mcode-hub` wrapper deprecation
 
 **Why**: mcode ≥ 0.4.0 走 native `tui.customStatusLine.command`,写一份
-`~/.minimax/config.yaml` 即可,mcode 自己 spawn `mcodex-status`,不 fork、
-不 patch mcode。`mcodex` wrapper 启动脚本失去"补 config"的核心价值(只
+`~/.minimax/config.yaml` 即可,mcode 自己 spawn `mcode-hub`,不 fork、
+不 patch mcode。`mcode-hub` wrapper 启动脚本失去"补 config"的核心价值(只
 剩 install / uninstall / status / doctor 等维护子命令)。
 
 **What**:
-- `mcodex` 启动时打 deprecation warning,**仍 exec mcode**(保持兼容)
+- `mcode-hub` 启动时打 deprecation warning,**仍 exec mcode**(保持兼容)
 - `--no-deprecation-warning` / `MCODEX_NO_DEPRECATION_WARNING` 静默选项
 - `install` / `uninstall` / `status` / `doctor` 子命令静默(无 warning)
 - 三阶段路线图(MAINTENANCE.md §10):
@@ -34,7 +34,7 @@ statusline 数据刷新率原则显式化:**远程 API 节流,本地 sqlite 实�
   - **v3.5**: install 默认不装 symlink
   - **v4.0**: 删除 wrapper
 - AGENTS.md / INSTALL.md / README.md / ARCHITECTURE.md 全部以 `mcode`
-  为主线;`mcodex` 退到 install / maintenance 边缘
+  为主线;`mcode-hub` 退到 install / maintenance 边缘
 
 **为什么不能一步到位**: wrapper 仍承担"刚 `mcode update` 完自动补
 `customStatusLine`"的 safety net,legacy fork (< 0.4.0) 还在产线。
@@ -100,7 +100,7 @@ fallback 到 `token_turns` 当 `user_turns = 0`(空 session 不显示 0)。
 |---|---|---|
 | T+0 | 注入前 | 15,280,739 |
 | T+1 | 注入 1.5M(1M in + 200K out + 300K cache read) | — |
-| T+2 | 单次 `mcodex-status` | **15,351,817** (delta = +71,078) |
+| T+2 | 单次 `mcode-hub` | **15,351,817** (delta = +71,078) |
 | — | 加上 1.5M 注入(下一次 tick 反映) | **16,924,316** (delta = +1,572,499) |
 
 **新 turn 在下一个 10s tick 立刻反映**(不是 60s 后)。
@@ -109,28 +109,28 @@ fallback 到 `token_turns` 当 `user_turns = 0`(空 session 不显示 0)。
 
 | mcode version | 启动命令 | strategy | 行为 |
 |---|---|---|---|
-| **≥ 0.4.0** | `mcode` (推荐) / `mcodex` (有 deprecation 警告) | native | 写 `~/.minimax/config.yaml`,mcode 自己 spawn mcodex-status |
-| < 0.4.0 | `mcodex` (still required) | legacy fork | `patches/_loader.mjs` 选 `patches/<version>/`,patcher 在 `~/.local/share/mcode-quota/mcode-clone/<v>/code/` 构私有 fork |
+| **≥ 0.4.0** | `mcode` (推荐) / `mcode-hub` (有 deprecation 警告) | native | 写 `~/.minimax/config.yaml`,mcode 自己 spawn mcode-hub |
+| < 0.4.0 | `mcode-hub` (still required) | legacy fork | `patches/_loader.mjs` 选 `patches/<version>/`,patcher 在 `~/.local/share/mcode-hub/mcode-clone/<v>/code/` 构私有 fork |
 
 两条路径共用 `lib/render.mjs`;`tests/parity.mjs` 断言输出逐字节一致。
 
 ## 文件改动汇总
 
 ```
-AGENTS.md       |  35 +/-     # "What mcodex is" 重写,以 mcode 为主线
-ARCHITECTURE.md |  37 +       # 启动路径图重画,mcodex 退到维护框
+AGENTS.md       |  35 +/-     # "What mcode-hub is" 重写,以 mcode 为主线
+ARCHITECTURE.md |  37 +       # 启动路径图重画,mcode-hub 退到维护框
 CHANGELOG.md    | 216 +       # 5 条 v3.4.x 条目
-INSTALL.md      |  11 +/-     # TL;DR 第 3 步 mcodex → mcode
+INSTALL.md      |  11 +/-     # TL;DR 第 3 步 mcode-hub → mcode
 MAINTENANCE.md  |  77 +       # §10 deprecation 路线图
 README.md       |  15 +/-     # 快速开始段调整
 lib/data.mjs    |  60 +/-     # TTL 默认值 + warmed 路径优化 + 顶部原则注释
-mcodex          |  26 +       # deprecation warning
+mcode-hub          |  26 +       # deprecation warning
 8 files changed, 449 insertions(+), 28 deletions(-)
 ```
 
 ## 上游 / 验证
 
-- **`mcodex doctor` / `mcode-quota-doctor`**: 17 ok, 0 warnings, 0 failures
+- **`mcode-hub doctor` / `mcode-hub-doctor`**: 17 ok, 0 warnings, 0 failures
 - **`mcode --version`**: 0.4.1
 - **本机 mcode TUI 实际渲染** (session `mvs_9ab7f891fdd3438f90f57cde67d3fc38`):
   ```
@@ -139,14 +139,14 @@ mcodex          |  26 +       # deprecation warning
   今日 「MiniMax-M3」 14.59M
   ```
 
-## 升级指南 (从 v3.3.x / 老 mcodex 用法)
+## 升级指南 (从 v3.3.x / 老 mcode-hub 用法)
 
 ```bash
-cd ~/Works/mcode-quota  # 或 mcodex 项目根
+cd ~/Works/mcode-hub  # 或 mcode-hub 项目根
 git pull                 # 拉 v3.4.x
-./mcodex-install         # 重新装,首次会装 symlink,后续 idempotent
-mcode                    # 用 mcode,不用 mcodex
-mcodex doctor            # 仍可用,但只是维护期诊断
+./mcode-hub-install         # 重新装,首次会装 symlink,后续 idempotent
+mcode                    # 用 mcode,不用 mcode-hub
+mcode-hub doctor            # 仍可用,但只是维护期诊断
 ```
 
-新 install 用户: 直接 `mcode` 即可,**不**需要 `mcodex` wrapper。
+新 install 用户: 直接 `mcode` 即可,**不**需要 `mcode-hub` wrapper。

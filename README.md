@@ -1,9 +1,9 @@
-# mcodex — mcode 配额 / token 状态栏
+# mcode-hub — mcode 配额 / token 状态栏
 
 在 mcode 的状态栏下方显示 3 行：
 
 ```
-~/orca/projects/mcode/mcode-quota │ ◇ 打招呼 │ ⎇ master │ Full access │ ✦ MiniMax-M3 · Thinking On │ Context 95% left │ Cache 98%
+~/orca/projects/mcode-hub │ ◇ 打招呼 │ ⎇ master │ Full access │ ✦ MiniMax-M3 · Thinking On │ Context 95% left │ Cache 98%
 会话 tokens 644.88M 「输入 8.01M │ 输出 1.41M │ 缓存 635.45M」 │ 上下文 43% 「425.84K/1.00M」 │ 缓存命中 99% │ 轮数 97
 小时会话窗口 [███████████░░░░░░░░░] 55% 剩余 │ 重置 2h 6m │ 周限制使用量 [███████████████████░] 97% 剩余 │ 重置 2d 11h
 今日 「MiniMax-M3」 170.19M │ 「deepseek-flash」 53.25M
@@ -13,7 +13,7 @@
 
 | mcode | 做法 | 修改 mcode |
 |---|---|---|
-| **≥ 0.4.0** | 用 mcode 原生的 `custom-command` 状态栏项跑 `mcodex-status` 脚本 | **0 字节** |
+| **≥ 0.4.0** | 用 mcode 原生的 `custom-command` 状态栏项跑 `mcode-hub` 脚本 | **0 字节** |
 | **< 0.4.0** | 私有 pristine-tarball fork + `patches/<version>/` 注入 | 0 字节（fork 是副本） |
 
 两条策略共用同一个渲染核心 `lib/render.mjs`，并用 `tests/parity.mjs` 在 18 个
@@ -22,28 +22,28 @@
 ## 快速开始
 
 **新机器首次安装**（macOS / Linux，自动检测 mcode 装法 + 装缺失依赖）：
-见 [INSTALL.md](INSTALL.md)，或直接跑 `./mcodex-install`。
+见 [INSTALL.md](INSTALL.md)，或直接跑 `./mcode-hub-install`。
 
 ```bash
-./mcodex-install     # 一次装好（写 config.yaml + 装 mmx + 装 PATH 入口）
-./mcodex status      # 当前策略、配置状态
-./mcodex doctor      # 自检（17 项）
+./mcode-hub-install     # 一次装好（写 config.yaml + 装 mmx + 装 PATH 入口）
+./mcode-hub status      # 当前策略、配置状态
+./mcode-hub doctor      # 自检（17 项）
 
 mcode                # 启动 mcode —— ≥ 0.4.0 直接用 mcode 即可
 ```
 
-> **v3.4.0 起 `mcodex`(无子命令)是 deprecation 中的 wrapper**——它跟
+> **v3.4.0 起 `mcode-hub`(无子命令)是 deprecation 中的 wrapper**——它跟
 > `mcode` 等价(同一份 `cli.js`、同一份 `~/.minimax/config.yaml`)。装好
-> 之后**直接跑 `mcode` 就行**；`mcodex` 只在维护场景(`install` /
+> 之后**直接跑 `mcode` 就行**；`mcode-hub` 只在维护场景(`install` /
 > `uninstall` / `status` / `doctor`)还有用。完整 roadmap 见
-> [MAINTENANCE.md §10](MAINTENANCE.md#10-mcodex-入口-deprecation-路线图v340-起)。
+> [MAINTENANCE.md §10](MAINTENANCE.md#10-mcode-hub-入口-deprecation-路线图v340-起)。
 
 ## mcode 升级时我要做什么
 
 ```bash
 mcode update          # 升级 mcode
-mcodex install        # 刷新配置（幂等；<0.4.0 时无需执行）
-mcodex doctor         # 期望 0 failures
+mcode-hub install        # 刷新配置（幂等；<0.4.0 时无需执行）
+mcode-hub doctor         # 期望 0 failures
 mcode                 # 直接跑 mcode
 ```
 
@@ -54,8 +54,8 @@ sqlite 表，不碰它的内部方法名。完整决策树（含什么时候才�
 
 ## 原生路径怎么工作（≥ 0.4.0）
 
-`mcodex install` 把这段合并进 `~/.minimax/config.yaml`（文本级编辑，保留你文件
-里的注释与排版，幂等，带一次性 `.mcodex-backup`）：
+`mcode-hub install` 把这段合并进 `~/.minimax/config.yaml`（文本级编辑，保留你文件
+里的注释与排版，幂等，带一次性 `.mcode-hub-backup`）：
 
 ```yaml
 tui:
@@ -63,7 +63,7 @@ tui:
     - ...既有项...
     - custom-command
   customStatusLine:
-    command: <repo>/mcodex-status
+    command: <repo>/mcode-hub
     display: block
     position: below
     maxLines: 3
@@ -98,9 +98,9 @@ mcode 在 startup / session 切换 / 每 10s 调用脚本，向它的 **stdin** 
 ## 文件
 
 ```
-mcodex                   入口：按 mcode 版本分发
-mcodex-status            ≥0.4.0 的 custom-command 目标脚本
-mcode-quota-doctor       自检（双路径）
+mcode-hub                   入口：按 mcode 版本分发
+mcode-hub            ≥0.4.0 的 custom-command 目标脚本
+mcode-hub-doctor       自检（双路径）
 lib/render.mjs           渲染核心（纯函数；两条路径共用）
 lib/data.mjs             数据层（sqlite / mmx / 缓存）
 lib/config-apply.mjs     config.yaml 文本级合并
@@ -117,9 +117,9 @@ tests/mcode-smoke.mjs    行为回归
 | `MCODE_QUOTA_TAIL` | `auto`（默认）/ `full` / `compact` —— 明细的显示策略 |
 | `MCODE_QUOTA_TTL_MS` | mmx 配额缓存 TTL（默认 60000） |
 | `MCODE_QUOTA_TODAY_TTL_MS` | 今日统计缓存 TTL（默认 60000） |
-| `MCODEX_CACHE_DIR` | 缓存目录（默认 `~/.cache/mcodex`） |
+| `MCODEX_CACHE_DIR` | 缓存目录（默认 `~/.cache/mcode-hub`） |
 | `MCODEX_STATUS_DEBUG=1` | 脚本诊断到 stderr |
-| `MCODE_QUOTA_DEBUG=1` | `mcodex` 诊断 |
+| `MCODE_QUOTA_DEBUG=1` | `mcode-hub` 诊断 |
 
 ## 效果
 
@@ -196,10 +196,10 @@ tests/mcode-smoke.mjs    行为回归
 | ≤ 20% | 暗红 | `(200,80,80)` |
 | 无数据 | 灰 | `(140,140,140)` |
 
-### 窄屏模式：`mcodex-status-compact`（v3.3.2+，可选）
+### 窄屏模式：`mcode-hub-status-compact`（v3.3.2+，可选）
 
 3 行 block 在 < 80 列的小终端会被 mcode 自家视觉宽度截断抹掉一部分。
-`mcodex-status-compact` 是 **1 行变体**：脚本用 `tput cols` 自己测真实
+`mcode-hub-status-compact` 是 **1 行变体**：脚本用 `tput cols` 自己测真实
 宽度并按梯度降级（≥50 → `ws │ model │ title`，30–49 → `ws │ model`，
 18–29 → `ws`，<18 → 静默），**不**让 mcode 的 `…` 省略号再吃掉内容。
 
@@ -209,7 +209,7 @@ tests/mcode-smoke.mjs    行为回归
 # ~/.minimax/config.yaml
 tui:
   customStatusLine:
-    command: /path/to/mcodex-status-compact    # 替代 mcodex-status
+    command: /path/to/mcode-hub-status-compact    # 替代 mcode-hub
     display: inline                            # 替代 block
     maxLines: 1                                # 替代 3
 ```
